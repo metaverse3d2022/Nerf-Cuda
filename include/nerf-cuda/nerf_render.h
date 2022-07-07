@@ -37,7 +37,7 @@ public:
     // render !
     void render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos, Eigen::Vector2i resolution);   // render an image according to camera inner parameters and outer parameters.
 
-    void generate_rays(struct Camera cam, Eigen::Matrix<float, 4, 4> pos, Eigen::Vector2i resolution, tcnn::GPUMemory<Eigen::Vector3f>& rays_o, tcnn::GPUMemory<Eigen::Vector3f>& rays_d);
+    void generate_rays(struct Camera cam, Eigen::Matrix<float, 4, 4> pos, Eigen::Vector2i resolution, tcnn::GPUMatrixDynamic<float>& rays_o, tcnn::GPUMatrixDynamic<float>& rays_d);
 
     void generate_density_grid(); 
 
@@ -62,7 +62,7 @@ private:
 
     // network variable
     filesystem::path m_network_config_path;
-	nlohmann::json m_network_config;
+    nlohmann::json m_network_config;
     std::shared_ptr<NerfNetwork<precision_t>> m_nerf_network;
 };
 

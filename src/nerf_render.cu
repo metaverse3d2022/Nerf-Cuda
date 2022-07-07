@@ -6,6 +6,7 @@
 #include <tiny-cuda-nn/encodings/grid.h>
 #include <tiny-cuda-nn/network.h>
 #include <tiny-cuda-nn/gpu_memory.h>
+#include <tiny-cuda-nn/gpu_matrix.h>
 #include <tiny-cuda-nn/network_with_input_encoding.h>
 
 #include <json/json.hpp>
@@ -178,8 +179,8 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
 
 
     int N = resolution[0] * resolution[1];   // number of pixels
-    tcnn::GPUMemory<Eigen::Vector3f> rays_o;      // initial points corresponding to pixels, in world coordination
-    tcnn::GPUMemory<Eigen::Vector3f> rays_d;      // direction corresponding to pixels, in world coordination
+    tcnn::GPUMatrixDynamic<float> rays_o(N,3,tcnn::RM);      // initial points corresponding to pixels, in world coordination
+    tcnn::GPUMatrixDynamic<float> rays_d(N,3,tcnn::RM);      // direction corresponding to pixels, in world coordination
     generate_rays(cam, pos, resolution, rays_o, rays_d);
 
     // Zilong
@@ -191,7 +192,7 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
     // 这里没有指定返回，后续可以再讨论返回图片是以什么格式。先渲染出来再说
 }
 
-void NerfRender::generate_rays(struct Camera cam, Eigen::Matrix<float, 4, 4> pos, Eigen::Vector2i resolution, tcnn::GPUMemory<Eigen::Vector3f>& rays_o, tcnn::GPUMemory<Eigen::Vector3f>& rays_d) {
+void NerfRender::generate_rays(struct Camera cam, Eigen::Matrix<float, 4, 4> pos, Eigen::Vector2i resolution, tcnn::GPUMatrixDynamic<float>& rays_o, tcnn::GPUMatrixDynamic<float>& rays_d) {
     // Weixuan
     // Generate rays according to the input
     // please refer to 
