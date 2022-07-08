@@ -37,6 +37,15 @@ __global__ void add_one(float* data, const int N = 5) {
 	data[index] += 1;
 }
 
+__global__ void matrix_add_one(MatrixView<float> data, const int M = 5, const int N = 5) {
+    const uint32_t encoded_index_x = threadIdx.x + blockIdx.x * blockDim.x;
+    const uint32_t encoded_index_y = threadIdx.y + blockIdx.y * blockDim.y;
+    if (encoded_index_x > M || encoded_index_y > N) {
+        return;
+    }
+    data(encoded_index_x, encoded_index_y) += 1;
+}
+
 int main(int argc, char** argv) {
     cout << "Hello, Metavese!" << endl;
     NerfRender* render = new NerfRender();
@@ -61,4 +70,17 @@ int main(int argc, char** argv) {
     add_one<<<1,5>>> (mom.data(), 5); // error operation : mom.data()[1] += 1; device variable should be operated in __device__ function !!!
     mom.copy_to_host(mom_h);
     cout << "Second Value of GPUMemory<float> (changed!) : " << mom_h[1] << endl;
+
+    // GPU Matrix reading and write
+    tcnn::GPUMatrixDynamic<float> matrix(5,5);
+    matrix.initialize_constant(1.0);
+    tcnn::MatrixView<float> view = matrix.view();
+    float host_data[1] = {0};
+    cudaMemcpy(host_data, &view(1,1), 1 * sizeof(float), cudaMemcpyDeviceToHost);    // copy one data to host, you can also copy a list of data to host!
+    cout << "Matrix[1,1] : " <<*host_data << endl;
+    dim3 dim_grid(1,1);
+    dim3 dim_thread(5,5);
+    matrix_add_one<<<dim_grid, dim_thread>>>(view);
+    cudaMemcpy(host_data, &view(1,1), 1 * sizeof(float), cudaMemcpyDeviceToHost);
+    cout << "Matrix[1,1] (Changed): " <<*host_data << endl;
 }
