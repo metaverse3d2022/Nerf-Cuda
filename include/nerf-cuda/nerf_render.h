@@ -17,6 +17,7 @@
 #include <nerf-cuda/common_device.cuh>
 #include <nerf-cuda/nerf_network.h>
 #include <tiny-cuda-nn/gpu_memory.h>
+#include <tiny-cuda-nn/gpu_matrix.h>
 #include <tiny-cuda-nn/random.h>
 #include <json/json.hpp>
 #include <filesystem/path.h>
