@@ -96,6 +96,7 @@ public:
 		local_rgb_network_config["n_input_dims"] = m_rgb_network_input_width;
 		local_rgb_network_config["n_output_dims"] = 3;
 		m_rgb_network.reset(tcnn::create_network<T>(local_rgb_network_config));
+        
 	}
 
 	virtual ~NerfNetwork() { }
@@ -284,6 +285,17 @@ public:
 		offset += m_dir_encoding->n_params();
 	}
 
+    void initialize_xavier_uniform(float scale = 1, uint64_t seed = 7) {
+        tcnn::pcg32 rng = tcnn::pcg32(seed);
+        int num_params = n_params();
+        tcnn::GPUMatrixDynamic<float> pfp(1, num_params);
+        pfp.initialize_xavier_uniform(rng, scale);
+        tcnn::GPUMatrixDynamic<T> p(1, num_params);
+        p.initialize_xavier_uniform(rng, scale);
+		// we only need inference parameters.
+        initialize_params(rng, pfp.data(), p.data(), p.data(), p.data(), p.data());
+    }
+
 	size_t n_params() const override {
 		return m_pos_encoding->n_params() + m_density_network->n_params() + m_dir_encoding->n_params() + m_rgb_network->n_params();
 	}
@@ -389,6 +401,7 @@ private:
 		std::unique_ptr<Context> density_network_ctx;
 		std::unique_ptr<Context> rgb_network_ctx;
 	};
+
 };
 
 NGP_NAMESPACE_END

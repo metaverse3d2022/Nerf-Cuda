@@ -98,6 +98,8 @@ void NerfRender::reload_network_from_file(const std::string& network_config_path
     // Need to do
     // 1. Load pretrained model
     // 2. Generate Density Grid, which will be used by ray sampler strategy!!!
+    // now we just initialize the weight randomly.
+    m_nerf_network -> initialize_xavier_uniform();
 }
 
 void NerfRender::reset_network()
@@ -169,6 +171,7 @@ void NerfRender::reset_network()
 			network_config,
 			rgb_network_config
 	);
+	
 }
 
 void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos, Eigen::Vector2i resolution)
@@ -190,6 +193,13 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
     // please refer to
     //     1. https://github.com/ashawkey/torch-ngp/blob/main/nerf/renderer.py line 318 ~ 380. espically the functions raymarching.compact_rays, raymarching.march_rays and raymarching.composite_rays. These function are places in https://github.com/ashawkey/torch-ngp/tree/main/raymarching/src.
     // 这里没有指定返回，后续可以再讨论返回图片是以什么格式。先渲染出来再说
+	// below is an example of inference!
+    tcnn::GPUMatrixDynamic<float> network_input(m_nerf_network -> input_width(), 4096);
+    tcnn::GPUMatrixDynamic<precision_t> network_output(m_nerf_network -> padded_output_width(), 4096);
+    tcnn::pcg32 rng = tcnn::pcg32((uint64_t) 32);
+    network_input.initialize_xavier_uniform(rng);
+    network_output.initialize_xavier_uniform(rng);
+    m_nerf_network -> inference_mixed_precision(network_input, network_output);
 }
 
 
