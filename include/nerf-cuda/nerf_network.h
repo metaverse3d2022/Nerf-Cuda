@@ -285,14 +285,16 @@ public:
 		offset += m_dir_encoding->n_params();
 	}
 
-    void initialize_xavier_uniform(float scale = 1, uint64_t seed = 7) {
+    void initialize_xavier_uniform(float scale = 1, uint64_t seed = 42) {
+		// now, we just initialize it with a constant!
         tcnn::pcg32 rng = tcnn::pcg32(seed);
         int num_params = n_params();
-        tcnn::GPUMatrixDynamic<float> pfp(1, num_params);
-        pfp.initialize_xavier_uniform(rng, scale);
-        tcnn::GPUMatrixDynamic<T> p(1, num_params);
-        p.initialize_xavier_uniform(rng, scale);
-		// we only need inference parameters.
+		tcnn::GPUMemory<float> pfp(num_params);
+		tcnn::GPUMemory<precision_t> p(num_params);
+		std::vector<float> pfp_h(num_params, 1.0/64);
+		std::vector<precision_t> p_h(num_params, 1.0/64);
+		pfp.copy_from_host(pfp_h);
+		p.copy_from_host(p_h);
         initialize_params(rng, pfp.data(), p.data(), p.data(), p.data(), p.data());
     }
 
