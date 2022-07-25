@@ -97,6 +97,9 @@ public:
 		local_rgb_network_config["n_output_dims"] = 3;
 		m_rgb_network.reset(tcnn::create_network<T>(local_rgb_network_config));
         
+        m_infer_params_full_precision = tcnn::GPUMemory<float>(n_params());
+        m_infer_params = tcnn::GPUMemory<T>(n_params());
+        
 	}
 
 	virtual ~NerfNetwork() { }
@@ -285,17 +288,16 @@ public:
 		offset += m_dir_encoding->n_params();
 	}
 
-    void initialize_xavier_uniform(float scale = 1, uint64_t seed = 42) {
+    void initialize_xavier_uniform(tcnn::pcg32& rng, float scale = 1) {
 		// now, we just initialize it with a constant!
-        tcnn::pcg32 rng = tcnn::pcg32(seed);
         int num_params = n_params();
-		tcnn::GPUMemory<float> pfp(num_params);
-		tcnn::GPUMemory<precision_t> p(num_params);
-		std::vector<float> pfp_h(num_params, 1.0/64);
-		std::vector<precision_t> p_h(num_params, 1.0/64);
-		pfp.copy_from_host(pfp_h);
-		p.copy_from_host(p_h);
-        initialize_params(rng, pfp.data(), p.data(), p.data(), p.data(), p.data());
+		std::vector<float> pfp_h(num_params, 1.0/32);
+		std::vector<precision_t> p_h(num_params, 1.0/32);
+		m_infer_params_full_precision.copy_from_host(pfp_h);
+		m_infer_params.copy_from_host(p_h);
+        initialize_params(rng, m_infer_params_full_precision.data(), 
+            m_infer_params.data(), m_infer_params.data(), 
+            m_infer_params.data(), m_infer_params.data());
     }
 
 	size_t n_params() const override {
@@ -383,6 +385,10 @@ private:
 	std::unique_ptr<tcnn::Network<T>> m_rgb_network;
 	std::shared_ptr<tcnn::Encoding<T>> m_pos_encoding;
 	std::shared_ptr<tcnn::Encoding<T>> m_dir_encoding;
+    
+    // parameters for network
+    tcnn::GPUMemory<float> m_infer_params_full_precision;
+    tcnn::GPUMemory<T> m_infer_params;
 
 	uint32_t m_rgb_network_input_width;
 	uint32_t m_n_pos_dims;

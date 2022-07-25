@@ -48,8 +48,8 @@ private:
     float m_scale = 1;
 
     // Random Number
-    uint32_t m_seed = 1337;
-    default_rng_t m_rng;
+    uint32_t m_seed = 42;
+    tcnn::pcg32 m_rng;
 
     // density grid parameter !
     int m_dg_cascade = 1;

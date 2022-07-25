@@ -55,7 +55,9 @@ NerfRender::NerfRender()
 			{"output_activation", "None"},
 		}},
 	};
+    
     CUDA_CHECK_THROW(cudaStreamCreate(&m_inference_stream));
+    m_rng = tcnn::pcg32(m_seed);
 }
 
 NerfRender::~NerfRender()
@@ -99,7 +101,7 @@ void NerfRender::reload_network_from_file(const std::string& network_config_path
     // 1. Load pretrained model
     // 2. Generate Density Grid, which will be used by ray sampler strategy!!!
     // now we just initialize the weight randomly.
-    m_nerf_network -> initialize_xavier_uniform();
+    m_nerf_network -> initialize_xavier_uniform(m_rng);
 }
 
 void NerfRender::reset_network()
@@ -194,12 +196,18 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
     //     1. https://github.com/ashawkey/torch-ngp/blob/main/nerf/renderer.py line 318 ~ 380. espically the functions raymarching.compact_rays, raymarching.march_rays and raymarching.composite_rays. These function are places in https://github.com/ashawkey/torch-ngp/tree/main/raymarching/src.
     // 这里没有指定返回，后续可以再讨论返回图片是以什么格式。先渲染出来再说
 	// below is an example of inference!
-    tcnn::GPUMatrixDynamic<float> network_input(m_nerf_network -> input_width(), 4096);
-    tcnn::GPUMatrixDynamic<precision_t> network_output(m_nerf_network -> padded_output_width(), 4096);
-    tcnn::pcg32 rng = tcnn::pcg32((uint64_t) 32);
-    network_input.initialize_xavier_uniform(rng);
-    network_output.initialize_xavier_uniform(rng);
+    int batch_size = 4096;
+    tcnn::GPUMatrixDynamic<float> network_input(m_nerf_network -> input_width(), batch_size);
+    tcnn::GPUMatrixDynamic<precision_t> network_output(m_nerf_network -> padded_output_width(), batch_size);
+    network_input.initialize_constant(0);
+    network_output.initialize_constant(0.1);
+	tcnn::MatrixView<precision_t> view = network_output.view();
+    precision_t host_data[1] = {0};
+    cudaMemcpy(host_data, &view(1,1), 1 * sizeof(precision_t), cudaMemcpyDeviceToHost);    // copy one data to host, you can also copy a list of data to host!
+    std::cout << "Network Output [1,1] before inference : " << (float) host_data[0] << std::endl;
     m_nerf_network -> inference_mixed_precision(network_input, network_output);
+	cudaMemcpy(host_data, &view(1,1), 1 * sizeof(precision_t), cudaMemcpyDeviceToHost);    // copy one data to host, you can also copy a list of data to host!
+    std::cout << "Network Output [1,1] after inference : " << (float) host_data[0] << std::endl;
 }
 
 
