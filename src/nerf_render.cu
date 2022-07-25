@@ -58,6 +58,7 @@ NerfRender::NerfRender()
     
     CUDA_CHECK_THROW(cudaStreamCreate(&m_inference_stream));
     m_rng = tcnn::pcg32(m_seed);
+    m_density_grid = tcnn::GPUMemory<float> (m_dg_cascade * m_dg_h * m_dg_h * m_dg_h);
 }
 
 NerfRender::~NerfRender()
@@ -286,6 +287,8 @@ void NerfRender::generate_density_grid()
 {   
     // Jiang Wei
     // once the pretrained model is loaded! we can generate the density grid.
+    std::vector<float> tmp_density(m_dg_cascade * m_dg_h * m_dg_h * m_dg_h, 0.1);
+    m_density_grid.copy_from_host(tmp_density);
 }
 
 NGP_NAMESPACE_END
