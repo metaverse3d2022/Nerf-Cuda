@@ -67,5 +67,10 @@ Eigen::Matrix<float, 4, 4> nerf_matrix_to_ngp(Eigen::Matrix<float, 4, 4> pose, f
     return new_pose;
 }
 
+// Ray Marching functions
+
+
+// Volume Render functions
+
 
 NGP_NAMESPACE_END
