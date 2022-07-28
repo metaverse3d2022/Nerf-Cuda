@@ -127,6 +127,7 @@ inline constexpr __device__ float RPI() { return 0.3183098861837907f; }
 
 __global__ void get_aabb(tcnn::MatrixView<float> aabb_in, const float bound_in,
                          const int N = 6) {
+  // prepare aabb with a 6D tensor (xmin, ymin, zmin, xmax, ymax, zmax)
   const uint32_t index_x = threadIdx.x + blockIdx.x * blockDim.x;
   if (index_x > N) {
     return;
@@ -141,6 +142,7 @@ __global__ void get_aabb(tcnn::MatrixView<float> aabb_in, const float bound_in,
 __global__ void init_step0(tcnn::MatrixView<int> rays_alive_view,
                            tcnn::MatrixView<float> rays_t_view, int n_alive,
                            tcnn::MatrixView<float> near_view) {
+  // init the rays_alive and rays_t at the first step of the loop
   const uint32_t index_x = threadIdx.x + blockIdx.x * blockDim.x;
   if (index_x > n_alive) {
     return;
@@ -156,6 +158,7 @@ __global__ void get_image_and_depth(
     tcnn::MatrixView<float> fars_view,         // 1,n
     tcnn::MatrixView<float> weights_sum_view,  // 1,n
     int bg_color, const uint32_t N) {
+  // get the final image and depth from render results
   const uint32_t n = threadIdx.x + blockIdx.x * blockDim.x;
   if (n >= N) return;
   auto inf = std::numeric_limits<float>::infinity();
@@ -177,6 +180,7 @@ __global__ void concat_network_in_and_out(
     const tcnn::MatrixView<float> b,        //(c2,b)
     tcnn::MatrixView<float> concat_result,  //(c1+c2,b)
     const uint32_t N, const uint32_t rows_a, const uint32_t rows_b) {
+  // concat two MatrixView to one
   const uint32_t n = threadIdx.x + blockIdx.x * blockDim.x;
   if (n >= N) return;
 
@@ -194,6 +198,7 @@ __global__ void decompose_network_in_and_out(
     tcnn::MatrixView<float> b,                    //(b,c2)
     tcnn::MatrixView<precision_t> concat_result,  //(1+c2,b)
     const uint32_t N, const uint32_t rows_a, const uint32_t cols_b) {
+  // decompose one MatrixView to two
   const uint32_t n = threadIdx.x + blockIdx.x * blockDim.x;
   if (n >= N) return;
 
