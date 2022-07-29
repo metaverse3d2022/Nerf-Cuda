@@ -121,7 +121,17 @@ inline __host__ __device__ uint32_t __morton3D(uint32_t x, uint32_t y,
   return xx | (yy << 1) | (zz << 2);
 }
 
+inline constexpr __device__ float DENSITY_THRESH() { return 0.01f; }
 inline constexpr __device__ float SQRT3() { return 1.7320508075688772f; }
+inline constexpr __device__ int MAX_STEPS() { return 1024; }
+inline constexpr __device__ float MIN_STEPSIZE() {
+  return 2 * SQRT3() / MAX_STEPS();
+}
+inline constexpr __device__ float MIN_NEAR() { return 0.05f; }
+inline constexpr __device__ float DT_GAMMA() {
+  return 1.0f / 128.0f;
+}  // accelerate if bound > 1 (very significant effect...)
+
 inline constexpr __device__ float RSQRT3() { return 0.5773502691896258f; }
 inline constexpr __device__ float RPI() { return 0.3183098861837907f; }
 
@@ -280,7 +290,7 @@ __global__ void kernel_compact_rays(const int n_alive,
   }
 }
 
-__global__ void kernel_march_rays(
+__global__ void kernel_march_rays0(
     const uint32_t n_alive, const uint32_t n_step,
     tcnn::MatrixView<int> rays_alive_view, tcnn::MatrixView<float> rays_t_view,
     tcnn::MatrixView<float> rays_o_view, tcnn::MatrixView<float> rays_d_view,
@@ -382,6 +392,118 @@ __global__ void kernel_march_rays(
       // step until next voxel
       do {
         t += clamp(t * dt_gamma, dt_min, dt_max);
+      } while (t < tt);
+    }
+  }
+}
+
+__global__ void kernel_march_rays(
+    const uint32_t n_alive, const uint32_t n_step,
+    tcnn::MatrixView<int> rays_alive_view, tcnn::MatrixView<float> rays_t_view,
+    tcnn::MatrixView<float> rays_o_view, tcnn::MatrixView<float> rays_d_view,
+    const float bound, const float dt_gamma, const uint32_t C, const uint32_t H,
+    float* grid,  // CASCADE * H * H * H * size_of(float)
+    const float mean_density, tcnn::MatrixView<float> nears_view,
+    tcnn::MatrixView<float> fars_view, tcnn::MatrixView<float> xyzs_view,
+    tcnn::MatrixView<float> dirs_view, tcnn::MatrixView<float> deltas_view,
+    const uint32_t perturb, const int i) {
+  const uint32_t n = threadIdx.x + blockIdx.x * blockDim.x;
+  if (n >= n_alive) return;
+
+  const int index = rays_alive_view(i % 2, n);  // ray id
+  float t = rays_t_view(i % 2, n);              // current ray's t
+
+  const float density_thresh = fminf(DENSITY_THRESH(), mean_density);
+
+  // locate
+  //   rays_o += index * 3;
+  //   rays_d += index * 3;
+  int xyzs_loc = n * n_step;
+  int dirs_loc = n * n_step;
+  int deltas_loc = n * n_step;
+  //   xyzs += n * n_step * 3;
+  //   dirs += n * n_step * 3;
+  //   deltas += n * n_step * 2;
+
+  const float ox = rays_o_view(n, 0), oy = rays_o_view(n, 1),
+              oz = rays_o_view(n, 2);
+  const float dx = rays_d_view(n, 0), dy = rays_d_view(n, 1),
+              dz = rays_d_view(n, 2);
+  const float rdx = 1 / dx, rdy = 1 / dy, rdz = 1 / dz;
+  const float near = nears_view(0, index), far = fars_view(0, index);
+
+  const float dt_min = MIN_STEPSIZE();
+  const float dt_max = 2 * bound / H;
+
+  // march for n_step steps, record points
+  uint32_t step = 0;
+
+  // introduce some randomness (pass in spp as perturb here)
+  if (perturb) {
+    pcg32 rng((uint64_t)n, (uint64_t)perturb);
+    t += MIN_STEPSIZE() * rng.next_float();
+  }
+
+  float last_t = t;
+
+  while (t < far && step < n_step) {
+    // current point
+    const float x = clamp(ox + t * dx, -bound, bound);
+    const float y = clamp(oy + t * dy, -bound, bound);
+    const float z = clamp(oz + t * dz, -bound, bound);
+
+    // get mip level
+    // TODO: check why using mip_from_dt...
+    const int level = mip_from_pos(x, y, z, C);  // range in [0, C - 1]
+    const float mip_bound = fminf(exp2f((float)level), bound);
+    const float mip_rbound = 1 / mip_bound;
+
+    // convert to nearest grid position
+    const int nx = clamp(0.5 * (x * mip_rbound + 1) * H, 0.0f, (float)(H - 1));
+    const int ny = clamp(0.5 * (y * mip_rbound + 1) * H, 0.0f, (float)(H - 1));
+    const int nz = clamp(0.5 * (z * mip_rbound + 1) * H, 0.0f, (float)(H - 1));
+
+    const uint32_t index = level * H * H * H + nx * H * H + ny * H + nz;
+    const float density = grid[index];
+
+    // if occpuied, advance a small step, and write to output
+    if (density > density_thresh) {
+      // write step
+      xyzs_view(xyzs_loc, 0) = x;
+      xyzs_view(xyzs_loc, 1) = y;
+      xyzs_view(xyzs_loc, 2) = z;
+      dirs_view(dirs_loc, 0) = dx;
+      dirs_view(dirs_loc, 1) = dy;
+      dirs_view(dirs_loc, 2) = dz;
+      // calc dt
+      const float dt = clamp(t * dt_gamma, dt_min, dt_max);
+      t += dt;
+      deltas_view(deltas_loc, 0) = dt;
+      deltas_view(deltas_loc, 1) = t - last_t;  // used to calc depth
+      last_t = t;
+      // step
+      xyzs_loc += 1;
+      dirs_loc += 1;
+      deltas_loc += 1;
+      step++;
+
+      // else, skip a large step (basically skip a voxel grid)
+    } else {
+      // calc distance to next voxel
+      const float tx =
+          (((nx + 0.5f + 0.5f * signf(dx)) / (H - 1) * 2 - 1) * mip_bound - x) *
+          rdx;
+      const float ty =
+          (((ny + 0.5f + 0.5f * signf(dy)) / (H - 1) * 2 - 1) * mip_bound - y) *
+          rdy;
+      const float tz =
+          (((nz + 0.5f + 0.5f * signf(dz)) / (H - 1) * 2 - 1) * mip_bound - z) *
+          rdz;
+      const float tt = t + fmaxf(0.0f, fminf(tx, fminf(ty, tz)));
+      // step until next voxel
+      do {
+        const float dt = clamp(t * dt_gamma, dt_min, dt_max);
+        t += dt;
       } while (t < tt);
     }
   }
