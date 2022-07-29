@@ -198,34 +198,22 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
 
   generate_rays(cam, pos, resolution, rays_o, rays_d);
 
-  // std::cout << "test" << std::endl;
   rays_o.initialize_constant(1.0);
-  // float tmp_h[1]={0};
-  // std::cout << *tmp_h << std::endl;
-  // cudaMemcpy(tmp_h, &rays_o.view()(0,0), 1 * sizeof(float),
-  // cudaMemcpyDeviceToHost); std::cout << *tmp_h << std::endl;
 
   // // calucate near and far
   tcnn::GPUMatrixDynamic<float> nears(1, N, tcnn::RM);
   tcnn::GPUMatrixDynamic<float> fars(1, N, tcnn::RM);
 
   int bg_color = 1;
-  float bound = 1;  // scalar
-  int cascade = 1 + ceil(log2(bound));
-  int grid_size = 128;
-  float dt_gamma = 0;  // called cone_angle in instant-ngp, exponentially
-                       // accelerate ray marching if > 0. (very significant
-                       // effect, but generally lead to worse performance)
+
   bool perturb = false;
-  int density_scale =
-      1;  // scale up deltas (or sigmas), to make the density grid more sharp.
-          // larger value than 1 usually improves performance.
-  tcnn::GPUMatrixDynamic<uint8_t> density_bitfield(
-      1, cascade * pow(grid_size, 3) / 8, tcnn::RM);
-  density_bitfield.initialize_constant(0);
+
+  // scale up deltas (or sigmas), to make the density grid more sharp.
+  // larger value than 1 usually improves performance.
+  int density_scale = 1;
 
   tcnn::GPUMatrixDynamic<float> aabb(1, 6, tcnn::RM);
-  get_aabb<<<1, 6>>>(aabb.view(), bound);
+  get_aabb<<<1, 6>>>(aabb.view(), m_bound);
 
   const float min_near = 0.2;
   int N_THREAD = 128;
@@ -298,12 +286,11 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
     dirs.initialize_constant(0);
     deltas.initialize_constant(0);
 
-    tcnn::pcg32 rng = tcnn::pcg32{(uint64_t)42};  // hard coded random seed
     kernel_march_rays<<<div_round_up(num_alive, N_THREAD), N_THREAD>>>(
         num_alive, num_step, rays_alive.view(), rays_t.view(), rays_o.view(),
-        rays_d.view(), bound, dt_gamma, max_steps, cascade, grid_size,
-        density_bitfield.view(), nears.view(), fars.view(), xyzs.view(),
-        dirs.view(), deltas.view(), perturb, rng, i);
+        rays_d.view(), m_bound, m_dg_threshould_l, m_dg_cascade, m_dg_h,
+        m_density_grid.data(), mean_density, nears.view(), fars.view(),
+        xyzs.view(), dirs.view(), deltas.view(), perturb, i);
 
     // Forward through the network
     tcnn::GPUMatrixDynamic<float> sigmas(1, num_alive * num_step, tcnn::RM);
