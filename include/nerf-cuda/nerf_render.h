@@ -63,9 +63,10 @@ class NerfRender {
   int m_dg_cascade = 1;
   int m_dg_h = 128;
   float m_dg_threshould_l = 1.e-4;
-  float mean_density = 1.e-4;
-  tcnn::GPUMemory<float>
-      m_density_grid;  // CASCADE * H * H * H * size_of(float),
+  float mean_density = 0.7;
+
+  tcnn::GPUMemory<float> m_density_grid;
+  // CASCADE * H * H * H * size_of(float),
   // index calculation : cascade_level * H * H * H + nx * H * H + ny * H + nz
 
   // Cuda Stuff
