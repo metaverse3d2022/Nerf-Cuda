@@ -64,6 +64,7 @@ NerfRender::NerfRender() {
        }},
   };
   CUDA_CHECK_THROW(cudaStreamCreate(&m_inference_stream));
+  m_density_grid = GPUMemory<float>(m_dg_cascade * m_dg_h * m_dg_h * m_dg_h);
 }
 
 NerfRender::~NerfRender() {}
@@ -198,8 +199,6 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
 
   generate_rays(cam, pos, resolution, rays_o, rays_d);
 
-  rays_o.initialize_constant(1.0);
-
   // // calucate near and far
   tcnn::GPUMatrixDynamic<float> nears(1, N, tcnn::RM);
   tcnn::GPUMatrixDynamic<float> fars(1, N, tcnn::RM);
@@ -211,6 +210,18 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
   // scale up deltas (or sigmas), to make the density grid more sharp.
   // larger value than 1 usually improves performance.
   int density_scale = 1;
+
+  //-----------------------------------
+  // init density randomly
+  std::vector<float> grid_host;
+  grid_host.resize(m_dg_cascade * m_dg_h * m_dg_h * m_dg_h, 0);
+  for (int i = 0; i < m_dg_cascade * m_dg_h * m_dg_h * m_dg_h; ++i) {
+    grid_host[i] = m_rng.next_float();
+    // std::cout << grid_host[i] << std::endl;
+  }
+
+  m_density_grid.copy_from_host(grid_host);
+  //--------------------------------------------
 
   tcnn::GPUMatrixDynamic<float> aabb(1, 6, tcnn::RM);
   get_aabb<<<1, 6>>>(aabb.view(), m_bound);
@@ -249,13 +260,12 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
     std::cout << "step " << step << std::endl;
     if (step == 0) {
       // init rays at first step
-      init_step0<<<1, num_alive>>>(rays_alive.view(), rays_t.view(), num_alive,
-                                   nears.view());
+      init_step0<<<div_round_up(num_alive, N_THREAD), N_THREAD>>>(
+          rays_alive.view(), rays_t.view(), num_alive, nears.view());
     } else {
       int tmp_value = 0;
       cudaMemcpy(&alive_counter.view()(0, 0), &tmp_value, 1 * sizeof(int),
                  cudaMemcpyHostToDevice);
-      // alive_counter(0) = 0;
       // remove dead rays and reallocate alive rays, to accelerate next ray
       // marching
       int new_i = i % 2;
@@ -267,9 +277,9 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
       cudaMemcpy(&num_alive, &alive_counter.view()(0, 0), 1 * sizeof(int),
                  cudaMemcpyDeviceToHost);
       // num_alive = alive_counter(0);
-      std::cout << "num_alives " << num_alive << std::endl;
     }
-
+    std::cout << "num_alives " << num_alive << std::endl;
+    std::cout << "grid_size " << m_density_grid.size() << std::endl;
     if (num_alive <= 0) {
       break;  // exit loop if no alive rays
     }
@@ -280,18 +290,19 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
     tcnn::GPUMatrixDynamic<float> xyzs(num_alive * num_step, 3, tcnn::RM);
     tcnn::GPUMatrixDynamic<float> dirs(num_alive * num_step, 3, tcnn::RM);
     tcnn::GPUMatrixDynamic<float> deltas(num_alive * num_step, 2, tcnn::RM);
-    // 2 vals, one for rgb, one for depth
+    // 2 values, one for rgb, one for depth
     // init it
     xyzs.initialize_constant(0);
     dirs.initialize_constant(0);
     deltas.initialize_constant(0);
-
+    std::cout << "march rays" << std::endl;
     kernel_march_rays<<<div_round_up(num_alive, N_THREAD), N_THREAD>>>(
         num_alive, num_step, rays_alive.view(), rays_t.view(), rays_o.view(),
         rays_d.view(), m_bound, m_dg_threshould_l, m_dg_cascade, m_dg_h,
         m_density_grid.data(), mean_density, nears.view(), fars.view(),
         xyzs.view(), dirs.view(), deltas.view(), perturb, i);
 
+    std::cout << "march rays done!" << std::endl;
     // Forward through the network
     tcnn::GPUMatrixDynamic<float> sigmas(1, num_alive * num_step, tcnn::RM);
     tcnn::GPUMatrixDynamic<float> rgbs(num_alive * num_step, 3, tcnn::RM);
@@ -307,10 +318,10 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
                                 N_THREAD>>>(
         xyzs.transposed().view(), dirs.transposed().view(),
         network_input.view(), num_alive * num_step, xyzs.cols(), dirs.cols());
-
+    std::cout << "inference" << std::endl;
     m_nerf_network->inference_mixed_precision_impl(
         m_inference_stream, network_input, network_output);
-
+    std::cout << "inference done" << std::endl;
     // decompose
     decompose_network_in_and_out<<<div_round_up(num_alive * num_step, N_THREAD),
                                    N_THREAD>>>(
@@ -321,16 +332,16 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
                            N_THREAD>>>(density_scale, num_alive * num_step,
                                        sigmas.view());
     // // sigmas = density_scale * sigmas;
-
+    std::cout << "composite rays" << std::endl;
     kernel_composite_rays<<<div_round_up(num_alive, N_THREAD), N_THREAD>>>(
         num_alive, num_step, rays_alive.view(), rays_t.view(), sigmas.view(),
         rgbs.view(), deltas.view(), weight_sum.view(), depth.view(),
         image.view(), i);
-
+    std::cout << "composite rays done" << std::endl;
     step += num_step;
     i += 1;
   }
-
+  std::cout << "get image and depth" << std::endl;
   get_image_and_depth<<<div_round_up(N, N_THREAD), N_THREAD>>>(
       image.view(), depth.view(), nears.view(), fars.view(), weight_sum.view(),
       bg_color, N);
@@ -350,8 +361,8 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
   std::cout << "deep  " << deep_h[1] << std::endl;
   std::cout << "image " << image_h[1] << std::endl;
 
-  char* const deep_file_name = "./deep.png";
-  char* const image_file_name = "./image.png";
+  char const* deep_file_name = "./deep.png";
+  char const* image_file_name = "./image.png";
   stbi_write_png(deep_file_name, resolution[0], resolution[1], 1, deep_h,
                  sizeof(float) * resolution[0]);
   stbi_write_png(image_file_name, resolution[0], resolution[1], 3, image_h,

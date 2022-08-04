@@ -154,7 +154,7 @@ __global__ void init_step0(tcnn::MatrixView<int> rays_alive_view,
                            tcnn::MatrixView<float> near_view) {
   // init the rays_alive and rays_t at the first step of the loop
   const uint32_t index_x = threadIdx.x + blockIdx.x * blockDim.x;
-  if (index_x > n_alive) {
+  if (index_x >= n_alive) {
     return;
   }
   rays_alive_view(0, index_x) = index_x;
@@ -171,10 +171,18 @@ __global__ void get_image_and_depth(
   // get the final image and depth from render results
   const uint32_t n = threadIdx.x + blockIdx.x * blockDim.x;
   if (n >= N) return;
+
   auto inf = std::numeric_limits<float>::infinity();
+  //   printf("inf %f\n", inf);
   image_view(n, 0) = image_view(n, 0) + (1 - weights_sum_view(0, n)) * bg_color;
+  //   printf(
+  //       "depth_view_before(0, %d): %f  nears_view(0,  %d): %f fars_view(0,
+  //       %d): "
+  //       "%f\n",
+  //       n, depth_view(0, n), n, nears_view(0, n), n, fars_view(0, n));
   depth_view(0, n) = clamp(depth_view(0, n) - nears_view(0, n), 0, inf) /
                      (fars_view(0, n) - nears_view(0, n));
+  //   printf("depth_view(0, %d): %f\n", n, depth_view(0, n));
 }
 
 __global__ void matrix_multiply_1x1n(int a, const uint32_t N,
@@ -413,6 +421,7 @@ __global__ void kernel_march_rays(
   const int index = rays_alive_view(i % 2, n);  // ray id
   float t = rays_t_view(i % 2, n);              // current ray's t
 
+  //   printf("%d kernel_march_rays : index:%d \n", n, index);
   const float density_thresh = fminf(DENSITY_THRESH(), mean_density);
 
   // locate
@@ -425,10 +434,10 @@ __global__ void kernel_march_rays(
   //   dirs += n * n_step * 3;
   //   deltas += n * n_step * 2;
 
-  const float ox = rays_o_view(n, 0), oy = rays_o_view(n, 1),
-              oz = rays_o_view(n, 2);
-  const float dx = rays_d_view(n, 0), dy = rays_d_view(n, 1),
-              dz = rays_d_view(n, 2);
+  const float ox = rays_o_view(index, 0), oy = rays_o_view(index, 1),
+              oz = rays_o_view(index, 2);
+  const float dx = rays_d_view(index, 0), dy = rays_d_view(index, 1),
+              dz = rays_d_view(index, 2);
   const float rdx = 1 / dx, rdy = 1 / dy, rdz = 1 / dz;
   const float near = nears_view(0, index), far = fars_view(0, index);
 
@@ -462,10 +471,11 @@ __global__ void kernel_march_rays(
     const int nx = clamp(0.5 * (x * mip_rbound + 1) * H, 0.0f, (float)(H - 1));
     const int ny = clamp(0.5 * (y * mip_rbound + 1) * H, 0.0f, (float)(H - 1));
     const int nz = clamp(0.5 * (z * mip_rbound + 1) * H, 0.0f, (float)(H - 1));
-
-    const uint32_t index = level * H * H * H + nx * H * H + ny * H + nz;
-    const float density = grid[index];
-
+    // printf("yes 2.5\n");
+    const uint32_t index_density = level * H * H * H + nx * H * H + ny * H + nz;
+    // printf("index_density:%d\n", index_density);
+    const float density = grid[index_density];
+    // printf("yes 3\n");
     // if occpuied, advance a small step, and write to output
     if (density > density_thresh) {
       // write step
@@ -486,6 +496,7 @@ __global__ void kernel_march_rays(
       dirs_loc += 1;
       deltas_loc += 1;
       step++;
+      //   printf("%d kernel_march_rays : xyzs_loc:%d \n", n, xyzs_loc);
 
       // else, skip a large step (basically skip a voxel grid)
     } else {
@@ -544,7 +555,7 @@ __global__ void kernel_composite_rays(
     if (deltas(deltas_loc, 0) == 0) break;
 
     const float alpha =
-        1.0f - __expf(-sigmas(sigmas_loc, 0) * deltas(sigmas_loc, 0));
+        1.0f - __expf(-sigmas(0, sigmas_loc) * deltas(0, sigmas_loc));
 
     /*
     T_0 = 1; T_i = \prod_{j=0}^{i-1} (1 - alpha_j)
