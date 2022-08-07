@@ -291,8 +291,8 @@ __global__ void kernel_compact_rays(const int n_alive,
   if (n >= n_alive) return;
 
   // rays_t_old[n] < 0 means ray died in last composite kernel.
-  if (rays_alive_view(i2, n) >= 0) {
-    const int index = alive_counter_view(0, 0) + 1;
+  if (rays_t_view(i2, n) >= 0) {
+    const int index = atomicAdd(&alive_counter_view(0, 0), 1);
     rays_alive_view(i1, index) = rays_alive_view(i2, n);
     rays_t_view(i1, index) = rays_t_view(i2, n);
   }

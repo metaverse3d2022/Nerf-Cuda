@@ -276,20 +276,20 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
 
       cudaMemcpy(&num_alive, &alive_counter.view()(0, 0), 1 * sizeof(int),
                  cudaMemcpyDeviceToHost);
-      // num_alive = alive_counter(0);
     }
     std::cout << "num_alives " << num_alive << std::endl;
-    std::cout << "grid_size " << m_density_grid.size() << std::endl;
+
     if (num_alive <= 0) {
       break;  // exit loop if no alive rays
     }
 
     // decide compact_steps
     int num_step = max(min(N / num_alive, 8), 1);
+    int step_x_alive = div_round_up(num_alive * num_step, 128) * 128;
 
-    tcnn::GPUMatrixDynamic<float> xyzs(num_alive * num_step, 3, tcnn::RM);
-    tcnn::GPUMatrixDynamic<float> dirs(num_alive * num_step, 3, tcnn::RM);
-    tcnn::GPUMatrixDynamic<float> deltas(num_alive * num_step, 2, tcnn::RM);
+    tcnn::GPUMatrixDynamic<float> xyzs(step_x_alive, 3, tcnn::RM);
+    tcnn::GPUMatrixDynamic<float> dirs(step_x_alive, 3, tcnn::RM);
+    tcnn::GPUMatrixDynamic<float> deltas(step_x_alive, 2, tcnn::RM);
     // 2 values, one for rgb, one for depth
     // init it
     xyzs.initialize_constant(0);
@@ -304,34 +304,33 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
 
     std::cout << "march rays done!" << std::endl;
     // Forward through the network
-    tcnn::GPUMatrixDynamic<float> sigmas(1, num_alive * num_step, tcnn::RM);
-    tcnn::GPUMatrixDynamic<float> rgbs(num_alive * num_step, 3, tcnn::RM);
+    tcnn::GPUMatrixDynamic<float> sigmas(1, step_x_alive, tcnn::RM);
+    tcnn::GPUMatrixDynamic<float> rgbs(step_x_alive, 3, tcnn::RM);
 
     // concat input
     tcnn::GPUMatrixDynamic<float> network_input(m_nerf_network->input_width(),
-                                                num_alive * num_step, tcnn::RM);
+                                                step_x_alive, tcnn::RM);
     // concat output
     tcnn::GPUMatrixDynamic<precision_t> network_output(
-        m_nerf_network->padded_output_width(), num_alive * num_step, tcnn::RM);
+        m_nerf_network->padded_output_width(), step_x_alive, tcnn::RM);
 
-    concat_network_in_and_out<<<div_round_up(num_alive * num_step, N_THREAD),
+    concat_network_in_and_out<<<div_round_up(step_x_alive, N_THREAD),
                                 N_THREAD>>>(
         xyzs.transposed().view(), dirs.transposed().view(),
-        network_input.view(), num_alive * num_step, xyzs.cols(), dirs.cols());
+        network_input.view(), step_x_alive, xyzs.cols(), dirs.cols());
     std::cout << "inference" << std::endl;
     m_nerf_network->inference_mixed_precision_impl(
         m_inference_stream, network_input, network_output);
     std::cout << "inference done" << std::endl;
     // decompose
-    decompose_network_in_and_out<<<div_round_up(num_alive * num_step, N_THREAD),
+    decompose_network_in_and_out<<<div_round_up(step_x_alive, N_THREAD),
                                    N_THREAD>>>(
-        sigmas.view(), rgbs.view(), network_output.view(), num_alive * num_step,
+        sigmas.view(), rgbs.view(), network_output.view(), step_x_alive,
         sigmas.rows(), rgbs.cols());
 
-    matrix_multiply_1x1n<<<div_round_up(num_alive * num_step, N_THREAD),
-                           N_THREAD>>>(density_scale, num_alive * num_step,
-                                       sigmas.view());
-    // // sigmas = density_scale * sigmas;
+    matrix_multiply_1x1n<<<div_round_up(step_x_alive, N_THREAD), N_THREAD>>>(
+        density_scale, step_x_alive, sigmas.view());
+
     std::cout << "composite rays" << std::endl;
     kernel_composite_rays<<<div_round_up(num_alive, N_THREAD), N_THREAD>>>(
         num_alive, num_step, rays_alive.view(), rays_t.view(), sigmas.view(),
@@ -346,7 +345,6 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
       image.view(), depth.view(), nears.view(), fars.view(), weight_sum.view(),
       bg_color, N);
 
-  //   char* deep_im = new char[N];
   float* deep_h = new float[N];
   std::cout << N * 3 << std::endl;
   std::cout << "image width " << resolution[0] << " image height "
