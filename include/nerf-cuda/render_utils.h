@@ -30,19 +30,20 @@ NGP_NAMESPACE_BEGIN
 // Ray Generation
 __global__ void set_rays_d(MatrixView<float> rays_d, struct Camera cam,
                            Eigen::Matrix<float, 3, 3> pose, int W, int N) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  const uint32_t indexWithinTheGrid = threadIdx.x + blockIdx.x * blockDim.x;
+  int gridStride = gridDim.x * blockDim.x;
+  // use the grid-stride-loops
+  for (int tid = indexWithinTheGrid; tid < N; tid += gridStride) {
+    float i = (tid % W) + 0.5;
+    float j = (tid / W) + 0.5;
 
-  float i = (tid % W) + 0.5;
-  float j = (tid / W) + 0.5;
+    float zs = 1;
+    float xs = (i - cam.cx) / cam.fl_x * zs;
+    float ys = (j - cam.cy) / cam.fl_y * zs;
+    Eigen::Vector3f directions(xs, ys, zs);
+    directions = directions / directions.norm();
+    Eigen::Vector3f ray_d = pose * directions;
 
-  float zs = 1;
-  float xs = (i - cam.cx) / cam.fl_x * zs;
-  float ys = (j - cam.cy) / cam.fl_y * zs;
-  Eigen::Vector3f directions(xs, ys, zs);
-  directions = directions / directions.norm();
-  Eigen::Vector3f ray_d = pose * directions;
-
-  if (tid < N) {
     rays_d(tid, 0) = ray_d[0];
     rays_d(tid, 1) = ray_d[1];
     rays_d(tid, 2) = ray_d[2];
@@ -51,11 +52,12 @@ __global__ void set_rays_d(MatrixView<float> rays_d, struct Camera cam,
 
 __global__ void set_rays_o(MatrixView<float> rays_o, Eigen::Vector3f ray_o,
                            int N) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-  // rays_o = rays_o[..., None, :].expand_as(rays_d) # [B, N, 3] @ function
-  // get_rays
-  if (tid < N) {
+  const uint32_t indexWithinTheGrid = threadIdx.x + blockIdx.x * blockDim.x;
+  int gridStride = gridDim.x * blockDim.x;
+  // use the grid-stride-loops
+  for (int tid = indexWithinTheGrid; tid < N; tid += gridStride) {
+    // rays_o = rays_o[..., None, :].expand_as(rays_d) # [B, N, 3] @ function
+    // get_rays
     rays_o(tid, 0) = ray_o[0];
     rays_o(tid, 1) = ray_o[1];
     rays_o(tid, 2) = ray_o[2];
