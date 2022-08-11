@@ -148,6 +148,19 @@ __global__ void get_aabb(tcnn::MatrixView<float> aabb_in, const float bound_in,
     aabb_in(0, index_x) = bound_in;
   }
 }
+__global__ void get_aabb0(tcnn::MatrixView<float> aabb_in, const float a, const float b,
+                         const int N = 6) {
+  // prepare aabb with a 6D tensor (xmin, ymin, zmin, xmax, ymax, zmax)
+  const uint32_t index_x = threadIdx.x + blockIdx.x * blockDim.x;
+  if (index_x > N) {
+    return;
+  }
+  if (index_x < 3) {
+    aabb_in(0, index_x) = a;
+  } else {
+    aabb_in(0, index_x) = b;
+  }
+}
 
 __global__ void init_step0(tcnn::MatrixView<int> rays_alive_view,
                            tcnn::MatrixView<float> rays_t_view, int n_alive,

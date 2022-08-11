@@ -387,6 +387,28 @@ class NerfNetwork : public tcnn::Network<float, T> {
     };
   }
 
+  void deserialize(const json& data) {
+		json::binary_t params = data["params_binary"];
+    if (params.size()/sizeof(T) != n_params()) {
+			throw std::runtime_error{"Can't set params because CPU buffer has the wrong size."};
+		}
+    std::cout << "nerf network n_params: " << n_params() << std::endl;
+    std::cout << "snapshot size: " << params.size()/sizeof(T) << std::endl;
+    std::cout << "size size: T: " << sizeof(T) << std::endl;
+    // params allocated: params_full_precision(float) params(__half) m_params_backward(__half) m_param_gradients(__half)
+    // CUDA_CHECK_THROW(cudaMemcpy(m_infer_params_full_precision.data(), params.data(), sizeof(T)*n_params(), cudaMemcpyHostToDevice));
+    CUDA_CHECK_THROW(cudaMemcpy(m_infer_params.data(), params.data(), sizeof(T)*n_params(), cudaMemcpyHostToDevice));
+    CUDA_CHECK_THROW(cudaDeviceSynchronize());
+    std::cout << "check pos 0" << std::endl;
+    parallel_for_gpu(n_params(), [params_fp=m_infer_params_full_precision.data(), params_inference=m_infer_params.data()] __device__ (size_t i) {
+			params_fp[i] = (float)params_inference[i];
+		});
+    // m_infer_params_full_precision.copy_from_device(params, n_params);
+    // m_infer_params.copy_from_device(params.data() + sizeof(float)*n_params, n_params);
+    // m_infer_params.copy_from_device(params);
+    CUDA_CHECK_THROW(cudaDeviceSynchronize());
+	}
+
  private:
   std::unique_ptr<tcnn::Network<T>> m_density_network;
   std::unique_ptr<tcnn::Network<T>> m_rgb_network;

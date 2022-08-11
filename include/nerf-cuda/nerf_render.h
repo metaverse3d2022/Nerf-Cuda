@@ -49,8 +49,10 @@ class NerfRender {
                      tcnn::GPUMatrixDynamic<float>& rays_d);
 
   void generate_density_grid();
+  void load_snapshot(const std::string& filepath_string);
 
  private:
+  std::vector<float> m_aabb_v;
   // Scene parameters
   float m_bound = 1;
   float m_scale = 1;

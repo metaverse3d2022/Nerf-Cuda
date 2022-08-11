@@ -50,8 +50,9 @@ int main(int argc, char** argv) {
     cout << "Hello, Metavese!" << endl;
     NerfRender* render = new NerfRender();
     string config_path = "./configs/nerf/base.json";
+    // string config_path = "/home/jiangwei/New/instant-ngp/data/nerf/fox/base.msgpack";
     render -> reload_network_from_file(config_path);   // Init Model
-    render -> generate_density_grid(); // generate densiy grid if we do not load it.
+    // render -> generate_density_grid(); // generate densiy grid if we do not load it.
     Camera cam={1920, 1920, 0, 0};
     Eigen::Matrix<float, 4, 4> pos;
     pos << 1, 0 , 0, 0, 
