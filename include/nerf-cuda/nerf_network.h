@@ -294,6 +294,10 @@ class NerfNetwork : public tcnn::Network<float, T> {
     int num_params = n_params();
     std::vector<float> pfp_h(num_params, 1.0 / 32);
     std::vector<precision_t> p_h(num_params, 1.0 / 32);
+    // for (int i = 0; i < num_params; ++i) {
+    //   pfp_h[i] = (float)(rng.next_float());
+    //   p_h[i] = (float)(rng.next_float());
+    // }
     m_infer_params_full_precision.copy_from_host(pfp_h);
     m_infer_params.copy_from_host(p_h);
     initialize_params(rng, m_infer_params_full_precision.data(),
