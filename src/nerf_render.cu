@@ -100,9 +100,16 @@ void NerfRender::reload_network_from_file(
     const std::string& network_config_path) {
   if (!network_config_path.empty()) {
     m_network_config_path = network_config_path;
+    if(equals_case_insensitive(m_network_config_path.extension(), "msgpack")){
+      load_snapshot(network_config_path);
+      reset_network();
+      m_nerf_network->deserialize(m_network_config["snapshot"]);
+    }else if(equals_case_insensitive(m_network_config_path.extension(), "json")){
+      m_network_config = load_network_config(network_config_path);
+      reset_network();
+      generate_density_grid();
+    }
   }
-  m_network_config = load_network_config(m_network_config_path);
-  reset_network();
 
   // Haoran
   // Need to do
@@ -228,7 +235,8 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
 
   // aabb: float, [6], (xmin, ymin, zmin, xmax, ymax, zmax)
   tcnn::GPUMatrixDynamic<float> aabb(1, 6, tcnn::RM);
-  get_aabb<<<1, 6>>>(aabb.view(), m_bound);
+  if(m_aabb_v.size()==0)  get_aabb<<<1, 6>>>(aabb.view(), m_bound);
+  else if(m_aabb_v.size()==6) get_aabb0<<<1, 6>>>(aabb.view(), m_aabb_v[0], m_aabb_v[5]);
 
   const float min_near = 0.2;  // mini scalar
 
@@ -302,7 +310,7 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
       cudaMemcpy(&num_alive, &alive_counter.view()(0, 0), 1 * sizeof(int),
                  cudaMemcpyDeviceToHost);
     }
-    std::cout << "num_alives " << num_alive << std::endl;
+    // std::cout << "num_alives " << num_alive << std::endl;
 
     if (num_alive <= 0) {
       break;  // exit loop if no alive rays
@@ -325,7 +333,6 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
     xyzs.initialize_constant(0);
     dirs.initialize_constant(0);
     deltas.initialize_constant(0);
-
     // march rays
     std::cout << "march rays" << std::endl;
     kernel_march_rays<<<div_round_up(num_alive, N_THREAD), N_THREAD>>>(
@@ -351,7 +358,6 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
                                 N_THREAD>>>(
         xyzs.transposed().view(), dirs.transposed().view(),
         network_input.view(), step_x_alive, xyzs.cols(), dirs.cols());
-
     std::cout << "inference" << std::endl;
     // forward through the network
     m_nerf_network->inference_mixed_precision_impl(
@@ -373,7 +379,7 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
         num_alive, num_step, rays_alive.view(), rays_t.view(), sigmas.view(),
         rgbs.view(), deltas.view(), weight_sum.view(), depth.view(),
         image.view(), i);
-    std::cout << "composite rays done" << std::endl;
+    // std::cout << "composite rays done" << std::endl;
     step += num_step;
     i += 1;
   }
@@ -459,9 +465,145 @@ void NerfRender::generate_rays(struct Camera cam,
             << host_data[2] << std::endl;
 }
 
+template <typename T>
+__global__ void dd_scale(const T* d_s, float *d_d, const uint32_t N, const float k=1, const float b=0)
+{
+	const uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+	if(tid>=N) return;
+
+	if(!d_s) d_d[tid] = k*float(d_s[tid])+b;
+	else d_d[tid] = k*d_d[tid]+b;
+}
+
+template <typename T>
+__global__ void init_xyzs(T* dd, const uint32_t N, const uint32_t H = 128)
+{
+	const uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+	if(tid>=N) return;
+
+	const uint32_t posid = tid/3;
+	const uint32_t xyzid = tid%3;
+	uint32_t id;
+	if(xyzid==2){
+		id = posid%H;
+	}else if(xyzid==1){
+		id = posid%(H*H)/H;
+	}else{
+		id = posid/(H*H);
+	}
+	dd[tid] = -1.f+2.f/(H-1)*id;
+}
+
+template <typename T>
+__global__ void add_random(T *dd, default_rng_t rng, const uint32_t N, const T k=1, const T b=0)
+{
+	const uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+	if(tid>=N) return;
+
+	// tmp in -1~1
+	// const float tmp = 2.f*random_val(rng)-1.f;
+	dd[tid] += k*(2.f*random_val(rng)-1.f)+b;
+}
+
+template <typename T>
+__global__ void dg_update(T *dg, T *tmp_dg, T decay, const uint32_t N)
+{
+	const uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+	if(tid>=N) return;
+
+	if(dg[tid]>=0){
+		dg[tid] = (dg[tid]*decay > tmp_dg[tid]) ? dg[tid]*decay : tmp_dg[tid];
+	}
+}
+
 void NerfRender::generate_density_grid() {
   // Jiang Wei
   // once the pretrained model is loaded! we can generate the density grid.
+  const uint32_t H = m_dg_h;
+	const uint32_t H2= H*H;
+	// const uint32_t H3= H*H;//*H;
+	const uint32_t H3= H*H*H;
+	const float decay = 0.95;
+	std::cout << "dg size: " << m_density_grid.size() << std::endl;
+	std::vector<float> tmpV(m_dg_cascade*H3, 1.0/64);
+	std::cout << "tmpV size: " << tmpV.size() << std::endl;
+	m_density_grid.resize(m_dg_cascade*H3);
+	m_density_grid.copy_from_host(tmpV);
+	
+	std::cout << "dg size: " << m_density_grid.size() << std::endl;
+	tcnn::GPUMatrixDynamic<float> xyzs(3,H3);
+	tcnn::GPUMatrixDynamic<float> cas_xyzs(3,H3);
+	tcnn::GPUMatrixDynamic<precision_t> density_out(16,H3);
+	tcnn::GPUMatrixDynamic<float> tmp_density(1,H3);
+
+	int block_size = H;
+  int grid_size = 3*H3/block_size;
+
+	init_xyzs <<<grid_size, block_size>>> (xyzs.data(), 3*H3);
+
+	for(int cas=0;cas<m_dg_cascade;cas++){
+		float bound = 1<<cas < m_bound ? 1<<cas : m_bound;
+		float half_grid_size = bound/H;
+
+		dd_scale   <<<grid_size, block_size>>> (xyzs.data(), cas_xyzs.data(), 3*H3, bound-half_grid_size);
+		add_random <<<grid_size, block_size>>> (cas_xyzs.data(), m_rng, 3*H3, half_grid_size);
+
+		// m_nerf_network->density(nullptr,cas_xyzs,density_out);
+
+		dd_scale  <<<H2, H>>> (density_out.slice_rows(0, 1).data(), tmp_density.data(), H3, 0.001691);
+	}
+
+	dg_update <<<H2, H>>> (m_density_grid.data(), tmp_density.data(), decay, H3);
+}
+
+void NerfRender::load_snapshot(const std::string& filepath_string){
+  tlog::info() << "Reading snapshot";
+	auto config = load_network_config(filepath_string);
+	if(!config.contains("snapshot")){
+		throw std::runtime_error{"File " + filepath_string + " does not contain a snapshot."};
+	}
+
+	const auto& snapshot = config["snapshot"];
+	// here not to check snapshot version, tmp==1
+
+  m_aabb_v = snapshot.value("aabb_v", m_aabb_v);
+  for(int i=0;i<m_aabb_v.size();i++){
+    std::cout << "aabb: " << m_aabb_v[i] << std::endl;
+  }
+	m_bound = snapshot["nerf"]["aabb_scale"];
+  m_dg_cascade = 0;
+	while ((1 << m_dg_cascade) < m_bound) {
+		++m_dg_cascade;
+	}
+  ++m_dg_cascade;
+	// m_bounding_radius = snapshot.value("bounding_radius", m_bounding_radius);
+
+	if (snapshot["density_grid_size"] != m_dg_h) {
+		throw std::runtime_error{"Incompatible grid size."};
+	}
+
+  nlohmann::json::binary_t density_grid_fp = snapshot["density_grid_binary_jw"];
+  const uint32_t dg_size = density_grid_fp.size()/sizeof(float);
+  std::cout << "Snapshot density grid size: " << dg_size << std::endl;
+  tlog::info() << "Snapshot bytes: " << density_grid_fp.size();
+	// GPUMemory<__half> density_grid_fp16 = snapshot["density_grid_binary"];
+	// // // auto density_grid_fp16 = snapshot["density_grid_binary"];
+	// std::cout << "Snapshot density grid size: " << density_grid_fp16.size() << std::endl;
+	m_density_grid.resize(dg_size);
+  tlog::info() << "Resize dg bytes: " << m_density_grid.bytes();
+  CUDA_CHECK_THROW(cudaMemcpy(m_density_grid.data(),density_grid_fp.data(),density_grid_fp.size(),cudaMemcpyHostToDevice));
+	// parallel_for_gpu(dg_size, [density_grid=m_density_grid.data(), density_grid_fp16=density_grid_fp.data()] __device__ (size_t i) {
+	// 	density_grid[i] = (float)density_grid_fp16[i];
+	// });
+
+	if (m_density_grid.size() != m_dg_h * m_dg_h * m_dg_h * m_dg_cascade) {
+		throw std::runtime_error{"Incompatible number of grid cascades."};
+	}
+
+	m_network_config_path = filepath_string;
+	m_network_config = config;
+
+
 }
 
 NGP_NAMESPACE_END

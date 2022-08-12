@@ -69,6 +69,7 @@ __global__ void matrix_add_one(MatrixView<float> data, const int M = 5,
 }
 
 int main(int argc, char** argv) {
+
   cout << "Hello, Metavese!" << endl;
   NerfRender* render = new NerfRender();
   string config_path = "./configs/nerf/base.json";
