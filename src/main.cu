@@ -72,14 +72,17 @@ int main(int argc, char** argv) {
 
   cout << "Hello, Metavese!" << endl;
   NerfRender* render = new NerfRender();
-  string config_path = "./configs/nerf/base.json";
+  string config_path = "base.msgpack";
   render->reload_network_from_file(config_path);  // Init Model
   render
       ->generate_density_grid();  // generate densiy grid if we do not load it.
-  Camera cam = {1920, 1920, 0, 0};
+  Camera cam = {1375.52, 1374.49, 554.558, 965.268};
   Eigen::Matrix<float, 4, 4> pos;
-  pos << 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1;
-  Eigen::Vector2i resolution(1920, 1080);
+  pos << 0.8926439112348871, 0.08799600283226543, 0.4420900262071262, 3.168359405609479,
+      0.4464189982715247, -0.03675452191179031, -0.8940689141475064, -5.4794898611466945,
+      -0.062425682580756266, 0.995442519072023, -0.07209178487538156, -0.9791660699008925,
+      0.0, 0.0, 0.0, 1.0;
+  Eigen::Vector2i resolution(1080, 1920);
   render->render_frame(cam, pos, resolution);
 
   int deviceId;

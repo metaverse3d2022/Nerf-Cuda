@@ -111,12 +111,6 @@ void NerfRender::reload_network_from_file(
     }
   }
 
-  // Haoran
-  // Need to do
-  // 1. Load pretrained model
-  // 2. Generate Density Grid, which will be used by ray sampler strategy!!!
-  tcnn::pcg32 rng = tcnn::pcg32{(uint64_t)42};
-  m_nerf_network->initialize_xavier_uniform(rng);
 }
 
 void NerfRender::reset_network() {
@@ -221,17 +215,6 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
   // scale up deltas (or sigmas), to make the density grid more sharp.
   // larger value than 1 usually improves performance.
   int density_scale = 1;
-
-  //-----------------------------------
-  // init density randomly
-  std::vector<float> grid_host;
-  grid_host.resize(m_dg_cascade * m_dg_h * m_dg_h * m_dg_h, 0);
-  for (int i = 0; i < m_dg_cascade * m_dg_h * m_dg_h * m_dg_h; ++i) {
-    grid_host[i] = m_rng.next_float();
-    // std::cout << grid_host[i] << std::endl;
-  }
-  m_density_grid.copy_from_host(grid_host);
-  //--------------------------------------------
 
   // aabb: float, [6], (xmin, ymin, zmin, xmax, ymax, zmax)
   tcnn::GPUMatrixDynamic<float> aabb(1, 6, tcnn::RM);

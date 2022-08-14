@@ -407,9 +407,10 @@ class NerfNetwork : public tcnn::Network<float, T> {
     parallel_for_gpu(n_params(), [params_fp=m_infer_params_full_precision.data(), params_inference=m_infer_params.data()] __device__ (size_t i) {
 			params_fp[i] = (float)params_inference[i];
 		});
-    // m_infer_params_full_precision.copy_from_device(params, n_params);
-    // m_infer_params.copy_from_device(params.data() + sizeof(float)*n_params, n_params);
-    // m_infer_params.copy_from_device(params);
+    CUDA_CHECK_THROW(cudaDeviceSynchronize());
+    tcnn::pcg32 rng = tcnn::pcg32{(uint64_t)42};
+    initialize_params(rng, m_infer_params_full_precision.data(), m_infer_params.data(), 
+      m_infer_params.data(), m_infer_params.data(), m_infer_params.data());
     CUDA_CHECK_THROW(cudaDeviceSynchronize());
 	}
 
