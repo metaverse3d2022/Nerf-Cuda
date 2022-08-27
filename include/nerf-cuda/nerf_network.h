@@ -17,6 +17,7 @@
 #pragma once
 
 #include <tiny-cuda-nn/common.h>
+#include <tiny-cuda-nn/common_device.h>
 #include <tiny-cuda-nn/encoding.h>
 #include <tiny-cuda-nn/gpu_matrix.h>
 #include <tiny-cuda-nn/gpu_memory.h>
@@ -29,15 +30,34 @@
 NGP_NAMESPACE_BEGIN
 
 template <typename T>
+__host__ __device__ T wrap_a_activation(tcnn::Activation activation, const T value) {
+  switch (activation)
+  {
+  case tcnn::Activation::ReLU:
+    return value * (T)((T) value > (T)0.0f);
+  case tcnn::Activation::Exponential:
+    return (T) (expf ((float) value));
+  case tcnn::Activation::Sigmoid:
+    return (T)(tcnn::logistic((float) value));
+  case tcnn::Activation::None:
+    return value;
+  default:
+    return value;
+  }
+}
+
+template <typename T>
 __global__ void extract_density(const uint32_t n_elements,
                                 const uint32_t density_stride,
                                 const uint32_t rgbd_stride,
                                 const T* __restrict__ density,
-                                T* __restrict__ rgbd) {
+                                T* __restrict__ rgbd,
+                                tcnn::Activation activation
+                                ) {
   const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
   if (i >= n_elements) return;
 
-  rgbd[i * rgbd_stride] = density[i * density_stride];
+  rgbd[i * rgbd_stride] = wrap_a_activation(activation, density[i * density_stride]);
 }
 
 template <typename T>
@@ -89,7 +109,8 @@ class NerfNetwork : public tcnn::Network<float, T> {
                                                "MegakernelMLP"))
             ? 16u
             : 8u));
-    uint32_t rgb_alignment = tcnn::minimum_alignment(rgb_network);
+    
+    uint32_t rgb_alignment = tcnn::minimum_alignment(rgb_network);     // 16 for FullyFusedMLP
     m_dir_encoding.reset(tcnn::create_encoding<T>(m_n_dir_dims + m_n_extra_dims,
                                                   dir_encoding, rgb_alignment));
 
@@ -101,6 +122,7 @@ class NerfNetwork : public tcnn::Network<float, T> {
     }
     m_density_network.reset(
         tcnn::create_network<T>(local_density_network_config));
+    m_sigma_activation = tcnn::string_to_activation(local_density_network_config.value("sigma_activation", "Exponential"));
 
     m_rgb_network_input_width =
         tcnn::next_multiple(m_dir_encoding->padded_output_width() +
@@ -114,6 +136,11 @@ class NerfNetwork : public tcnn::Network<float, T> {
 
     m_infer_params_full_precision = tcnn::GPUMemory<float>(n_params());
     m_infer_params = tcnn::GPUMemory<T>(n_params());
+
+    tlog::info() << "Density Network Params : " << m_density_network -> n_params();
+    tlog::info() << "Color Network Params : " << m_rgb_network -> n_params();
+    tlog::info() << "Position Encoder Params : " << m_pos_encoding -> n_params();
+    tlog::info() << "Direction Encoder Params : " << m_dir_encoding -> n_params();
   }
 
   virtual ~NerfNetwork() {}
@@ -122,6 +149,8 @@ class NerfNetwork : public tcnn::Network<float, T> {
       cudaStream_t stream, const tcnn::GPUMatrixDynamic<float>& input,
       tcnn::GPUMatrixDynamic<T>& output,
       bool use_inference_params = true) override {
+        // input : Matrix[input_width, batch_size], 0th ~ pos_width rows for pos, dir_offset ~ dir_width for dir.
+        // output : Matrix[padded_output_width, batch_size], 0th ~ 2th rows for rgb, 3th row for density.
     uint32_t batch_size = input.n();
     tcnn::GPUMatrixDynamic<T> density_network_input{
         m_pos_encoding->padded_output_width(), batch_size, stream,
@@ -162,8 +191,9 @@ class NerfNetwork : public tcnn::Network<float, T> {
             : 1,
         output.layout() == tcnn::AoS ? padded_output_width() : 1,
         density_network_output.data(),
-        output.data() + 3 * (output.layout() == tcnn::AoS ? 1 : batch_size));
-  }
+        output.data() + 3 * (output.layout() == tcnn::AoS ? 1 : batch_size),
+        m_sigma_activation);
+    }
 
   uint32_t padded_density_output_width() const {
     return m_density_network->padded_output_width();
@@ -392,27 +422,135 @@ class NerfNetwork : public tcnn::Network<float, T> {
   }
 
   void deserialize(const json& data) {
-		json::binary_t params = data["params_binary"];
-    if (params.size()/sizeof(T) != n_params()) {
-			throw std::runtime_error{"Can't set params because CPU buffer has the wrong size."};
+    if (data["params"].size() != n_params()) {
+			throw std::runtime_error{"Can't set params because number of parameters and model size do not match with each other."};
 		}
-    std::cout << "nerf network n_params: " << n_params() << std::endl;
-    std::cout << "snapshot size: " << params.size()/sizeof(T) << std::endl;
-    std::cout << "size size: T: " << sizeof(T) << std::endl;
-    // params allocated: params_full_precision(float) params(__half) m_params_backward(__half) m_param_gradients(__half)
-    // CUDA_CHECK_THROW(cudaMemcpy(m_infer_params_full_precision.data(), params.data(), sizeof(T)*n_params(), cudaMemcpyHostToDevice));
-    CUDA_CHECK_THROW(cudaMemcpy(m_infer_params.data(), params.data(), sizeof(T)*n_params(), cudaMemcpyHostToDevice));
-    CUDA_CHECK_THROW(cudaDeviceSynchronize());
-    std::cout << "check pos 0" << std::endl;
+    std::vector<float> values_full(data["params"].size(), 0);
+    for (int i=0; i < data["params"].size(); i++) {
+      values_full[i] = data["params"].at(i);
+    }
+    m_infer_params_full_precision.resize_and_copy_from_host(values_full);
+    m_infer_params.resize(n_params());
     parallel_for_gpu(n_params(), [params_fp=m_infer_params_full_precision.data(), params_inference=m_infer_params.data()] __device__ (size_t i) {
-			params_fp[i] = (float)params_inference[i];
+			params_inference[i] = (T) params_fp[i];
 		});
     CUDA_CHECK_THROW(cudaDeviceSynchronize());
-    tcnn::pcg32 rng = tcnn::pcg32{(uint64_t)42};
-    initialize_params(rng, m_infer_params_full_precision.data(), m_infer_params.data(), 
-      m_infer_params.data(), m_infer_params.data(), m_infer_params.data());
+    tcnn::pcg32 rng(42);
+    set_params(m_infer_params.data(), m_infer_params.data(), nullptr, nullptr);
     CUDA_CHECK_THROW(cudaDeviceSynchronize());
+    test();
+
 	}
+
+  void test() {
+    uint32_t batch_size = 128;
+    int view_num = 1024;
+    tcnn::GPUMemory<T> output_t(view_num);
+    tcnn::GPUMemory<float> output_fp(view_num);
+    float output_cpu[view_num];
+
+    // test density network
+    tcnn::GPUMatrixDynamic<T> density_network_input{
+        m_pos_encoding->padded_output_width(), batch_size, nullptr,
+        m_pos_encoding->preferred_output_layout()};
+    density_network_input.initialize_constant(0.1);
+
+    tcnn::GPUMatrixDynamic<T> density_network_output{
+        m_density_network->padded_output_width(), batch_size, nullptr,
+        m_pos_encoding->preferred_output_layout()
+        };
+
+    m_density_network->inference_mixed_precision(nullptr, density_network_input,
+                                                 density_network_output,
+                                                 true);  
+    CUDA_CHECK_THROW(cudaMemcpy(output_t.data(), density_network_output.data(), sizeof(T) * view_num, cudaMemcpyDeviceToDevice));
+    parallel_for_gpu(view_num, [params_fp=output_fp.data(), params_inference=output_t.data()] __device__ (size_t i) {
+			params_fp[i] = (float) params_inference[i];
+		});
+    output_fp.copy_to_host(output_cpu, view_num);
+    tlog::info() << "Density Net Inference : " << output_cpu[0] << "\t" << output_cpu[128] << "\t" << output_cpu[view_num - 128];
+
+    // test color network
+    tcnn::GPUMatrixDynamic<T> rgb_network_input{
+        m_rgb_network_input_width, batch_size, nullptr,
+        m_dir_encoding->preferred_output_layout()};
+    rgb_network_input.initialize_constant(0.1);
+
+    tcnn::GPUMatrixDynamic<T> rgb_network_output{
+        m_rgb_network->padded_output_width(), batch_size, nullptr,
+        m_dir_encoding->preferred_output_layout()
+        };
+
+    m_rgb_network->inference_mixed_precision(nullptr, rgb_network_input,
+                                                 rgb_network_output,
+                                                 true);  
+    CUDA_CHECK_THROW(cudaMemcpy(output_t.data(), rgb_network_output.data(), sizeof(T) * view_num, cudaMemcpyDeviceToDevice));
+    parallel_for_gpu(view_num, [params_fp=output_fp.data(), params_inference=output_t.data()] __device__ (size_t i) {
+			params_fp[i] = (float) params_inference[i];
+		});
+    output_fp.copy_to_host(output_cpu, view_num);
+    tlog::info() << "RGB Net Inference : " << output_cpu[0] << "\t" << output_cpu[128] << "\t" << output_cpu[view_num - 128];
+
+    // test hash encoding
+    tcnn::GPUMatrixDynamic<float> pos_input{
+        m_pos_encoding -> input_width(), batch_size, nullptr,
+        m_pos_encoding->preferred_output_layout()};
+    pos_input.initialize_constant((0.1 + 1)/2);
+
+    tcnn::GPUMatrixDynamic<T> pos_output{
+        m_pos_encoding->padded_output_width(), batch_size, nullptr,
+        m_pos_encoding->preferred_output_layout()
+        };
+    m_pos_encoding->inference_mixed_precision(
+        nullptr, pos_input,
+        pos_output, true);
+    CUDA_CHECK_THROW(cudaMemcpy(output_t.data(), pos_output.data(), sizeof(T) * view_num, cudaMemcpyDeviceToDevice));
+    parallel_for_gpu(view_num, [params_fp=output_fp.data(), params_inference=output_t.data()] __device__ (size_t i) {
+			params_fp[i] = (float) params_inference[i];
+		});
+    output_fp.copy_to_host(output_cpu, view_num);
+    tlog::info() << "Pos Encoding Inference : " << output_cpu[0] << "\t" << output_cpu[128] << "\t" << output_cpu[view_num - 128];
+
+    // test sh encoding
+    tcnn::GPUMatrixDynamic<float> dir_input{
+        m_dir_encoding -> input_width(), batch_size, nullptr,
+        m_dir_encoding->preferred_output_layout()};
+    dir_input.initialize_constant(0.1);
+
+    tcnn::GPUMatrixDynamic<T> dir_output{
+        m_dir_encoding -> padded_output_width(), batch_size, nullptr,
+        m_dir_encoding -> preferred_output_layout()
+        };
+    m_dir_encoding -> inference_mixed_precision(
+        nullptr, dir_input,
+        dir_output, true);
+    CUDA_CHECK_THROW(cudaMemcpy(output_t.data(), dir_output.data(), sizeof(T) * view_num, cudaMemcpyDeviceToDevice));
+    parallel_for_gpu(view_num, [params_fp=output_fp.data(), params_inference=output_t.data()] __device__ (size_t i) {
+			params_fp[i] = (float) params_inference[i];
+		});
+    output_fp.copy_to_host(output_cpu, view_num);
+    tlog::info() << "Dir Encoding Inference : " << output_cpu[0] << "\t" << output_cpu[128] << "\t" << output_cpu[view_num - 128];
+    
+    // test all
+    tcnn::GPUMatrixDynamic<float> tot_input{
+        input_width(), batch_size, nullptr,
+        m_dir_encoding -> preferred_output_layout()};
+    tot_input.initialize_constant(0.1);
+
+    tcnn::GPUMatrixDynamic<T> tot_output{
+        padded_output_width(), batch_size, nullptr,
+        m_dir_encoding -> preferred_output_layout()
+        };
+    inference_mixed_precision_impl(
+        nullptr, tot_input,
+        tot_output, true);
+    CUDA_CHECK_THROW(cudaMemcpy(output_t.data(), tot_output.data(), sizeof(T) * view_num, cudaMemcpyDeviceToDevice));
+    parallel_for_gpu(view_num, [params_fp=output_fp.data(), params_inference=output_t.data()] __device__ (size_t i) {
+			params_fp[i] = (float) params_inference[i];
+		});
+    output_fp.copy_to_host(output_cpu, view_num);
+    tlog::info() << "Tot Inference : " << output_cpu[0] << "\t" << output_cpu[128] << "\t" << output_cpu[128 * 2] << "\t" << output_cpu[128 * 3];
+  }
 
  private:
   std::unique_ptr<tcnn::Network<T>> m_density_network;
@@ -423,6 +561,7 @@ class NerfNetwork : public tcnn::Network<float, T> {
   // parameters for network
   tcnn::GPUMemory<float> m_infer_params_full_precision;
   tcnn::GPUMemory<T> m_infer_params;
+  tcnn::Activation m_sigma_activation;
 
   uint32_t m_rgb_network_input_width;
   uint32_t m_n_pos_dims;

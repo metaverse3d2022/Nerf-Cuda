@@ -52,21 +52,21 @@ class NerfRender {
   void load_snapshot(const std::string& filepath_string);
 
  private:
-  std::vector<float> m_aabb_v;
+  tcnn::GPUMemory<float> m_aabb;
   // Scene parameters
   float m_bound = 1;
-  float m_scale = 1;
+  float m_scale = 0.33;
 
   // Random Number
   uint32_t m_seed = 42;
   tcnn::pcg32 m_rng;
 
   // density grid parameter !
+  float m_density_scale=1;
   int m_dg_cascade = 1;
   int m_dg_h = 128;
   float m_dg_threshould_l = 1.e-4;
-  float mean_density = 0.7;
-
+  float m_mean_density = 1.e-4;
   tcnn::GPUMemory<float> m_density_grid;
   // CASCADE * H * H * H * size_of(float),
   // index calculation : cascade_level * H * H * H + nx * H * H + ny * H + nz

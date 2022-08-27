@@ -72,10 +72,8 @@ int main(int argc, char** argv) {
 
   cout << "Hello, Metavese!" << endl;
   NerfRender* render = new NerfRender();
-  string config_path = "base.msgpack";
+  string config_path = "../result/nerf/test.msgpack";
   render->reload_network_from_file(config_path);  // Init Model
-  render
-      ->generate_density_grid();  // generate densiy grid if we do not load it.
   Camera cam = {1375.52, 1374.49, 554.558, 965.268};
   Eigen::Matrix<float, 4, 4> pos;
   pos << 0.8926439112348871, 0.08799600283226543, 0.4420900262071262, 3.168359405609479,
@@ -91,7 +89,7 @@ int main(int argc, char** argv) {
 
   cudaDeviceProp props;
   cudaGetDeviceProperties(&props, deviceId);
-  printDeviceProp(props);
+  // printDeviceProp(props);
 
   // // GPU memory reading and write
   // tcnn::GPUMemory<float> mom(5); // length is equal to 5.

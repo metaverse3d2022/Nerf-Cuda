@@ -75,6 +75,57 @@ Eigen::Matrix<float, 4, 4> nerf_matrix_to_ngp(
   return new_pose;
 }
 
+template <typename T>
+__global__ void dd_scale(const T* d_s, float *d_d, const uint32_t N, const float k=1, const float b=0)
+{
+	const uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+	if(tid>=N) return;
+
+	if(!d_s) d_d[tid] = k*float(d_s[tid])+b;
+	else d_d[tid] = k*d_d[tid]+b;
+}
+
+template <typename T>
+__global__ void init_xyzs(T* dd, const uint32_t N, const uint32_t H = 128)
+{
+	const uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+	if(tid>=N) return;
+
+	const uint32_t posid = tid/3;
+	const uint32_t xyzid = tid%3;
+	uint32_t id;
+	if(xyzid==2){
+		id = posid%H;
+	}else if(xyzid==1){
+		id = posid%(H*H)/H;
+	}else{
+		id = posid/(H*H);
+	}
+	dd[tid] = -1.f+2.f/(H-1)*id;
+}
+
+template <typename T>
+__global__ void add_random(T *dd, default_rng_t rng, const uint32_t N, const T k=1, const T b=0)
+{
+	const uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+	if(tid>=N) return;
+
+	// tmp in -1~1
+	// const float tmp = 2.f*random_val(rng)-1.f;
+	dd[tid] += k*(2.f*random_val(rng)-1.f)+b;
+}
+
+template <typename T>
+__global__ void dg_update(T *dg, T *tmp_dg, T decay, const uint32_t N)
+{
+	const uint32_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+	if(tid>=N) return;
+
+	if(dg[tid]>=0){
+		dg[tid] = (dg[tid]*decay > tmp_dg[tid]) ? dg[tid]*decay : tmp_dg[tid];
+	}
+}
+
 // Ray Marching functions
 
 template <typename T>
@@ -246,7 +297,7 @@ __global__ void concat_network_in_and_out(
       if (i < rows_a) {
         concat_result(i, n) = a(i, n);
       } else {
-        concat_result(i, n) = b(i - rows_a, n);
+        concat_result(i+1, n) = b(i - rows_a, n);
       }
     }
   }
@@ -271,10 +322,10 @@ __global__ void decompose_network_in_and_out(
   // use the grid-stride-loops
   for (int n = indexWithinTheGrid; n < N; n += gridStride) {
     for (int i = 0; i < rows_a + cols_b; ++i) {
-      if (i < rows_a) {
-        a(i, n) = concat_result(i, n);
+      if (i < cols_b) {
+        b(n, i) = concat_result(i, n);
       } else {
-        b(n, i - rows_a) = concat_result(i, n);
+        a(i - cols_b, n) = concat_result(i, n);
       }
     }
   }
@@ -587,18 +638,9 @@ __global__ void kernel_march_rays(
         // else, skip a large step (basically skip a voxel grid)
       } else {
         // calc distance to next voxel
-        const float tx =
-            (((nx + 0.5f + 0.5f * signf(dx)) / (H - 1) * 2 - 1) * mip_bound -
-             x) *
-            rdx;
-        const float ty =
-            (((ny + 0.5f + 0.5f * signf(dy)) / (H - 1) * 2 - 1) * mip_bound -
-             y) *
-            rdy;
-        const float tz =
-            (((nz + 0.5f + 0.5f * signf(dz)) / (H - 1) * 2 - 1) * mip_bound -
-             z) *
-            rdz;
+        const float tx = (((nx + 0.5f + 0.5f * signf(dx)) / (H - 1) * 2 - 1) * mip_bound - x) * rdx;
+        const float ty = (((ny + 0.5f + 0.5f * signf(dy)) / (H - 1) * 2 - 1) * mip_bound - y) * rdy;
+        const float tz = (((nz + 0.5f + 0.5f * signf(dz)) / (H - 1) * 2 - 1) * mip_bound - z) * rdz;
         const float tt = t + fmaxf(0.0f, fminf(tx, fminf(ty, tz)));
         // step until next voxel
         do {

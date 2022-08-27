@@ -26,5 +26,13 @@
 NGP_NAMESPACE_BEGIN
 
 using precision_t = tcnn::network_precision_t;
+// using precision_t = float;
+
+template <typename T>
+__global__ void linear_transformer(const uint32_t n_elements, const T weight, const T bias, const T* input, T* n_input) {
+  const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
+  if (i >= n_elements) return;
+  n_input[i] = (T) ((T) weight * (T) input[i] + (T) bias);
+}
 
 NGP_NAMESPACE_END
