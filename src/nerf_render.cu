@@ -187,22 +187,9 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
   tcnn::GPUMatrixDynamic<float> nears(1, N, tcnn::RM);
   tcnn::GPUMatrixDynamic<float> fars(1, N, tcnn::RM);
 
-  // background color [3] in range [0, 1]
-  int bg_color = 1;
-
-  // bool/int, int > 0 is used as the random seed.
-  bool perturb = false;
-
-  const float min_near = 0.2;  // mini scalar
-
-  // the thread number per block
-  int N_THREAD = 256;
-
-  float host_data[3] = {0};
-  int i_host_data[3] = {0};
   // caliucate nears and fars
-  kernel_near_far_from_aabb<<<div_round_up(N, N_THREAD), N_THREAD>>>(
-      rays_o.view(), rays_d.view(), m_aabb.data(), N, min_near, nears.view(),
+  kernel_near_far_from_aabb<<<div_round_up(N, m_num_thread), m_num_thread>>>(
+      rays_o.view(), rays_d.view(), m_aabb.data(), N, m_min_near, nears.view(),
       fars.view());
 
   //  allocate outputs
@@ -240,14 +227,12 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
   //   //(here we record two deltas, the first is for RGB, the second for
   //   depth). tcnn::GPUMatrixDynamic<float> deltas(num_alive, 2, tcnn::RM);
 
-  int max_steps = 1024;  // the maxmize march steps
   int step = 0;          // the current march step
   int i = 0;             // the flag to index old and new rays
-  while (step < max_steps) {
-    std::cout << "marching step: " << step << std::endl;
+  while (step < m_max_infer_steps) {
     if (step == 0) {
       // init rays at first step
-      init_step0<<<div_round_up(num_alive, N_THREAD), N_THREAD>>>(
+      init_step0<<<div_round_up(num_alive, m_num_thread), m_num_thread>>>(
           rays_alive.view(), rays_t.view(), num_alive, nears.view());
     } else {
       // initialize alive_couter's value with 0
@@ -259,15 +244,13 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
       // marching
       int new_i = i % 2;
       int old_i = (i + 1) % 2;
-      kernel_compact_rays<<<div_round_up(num_alive, N_THREAD), N_THREAD>>>(
+      kernel_compact_rays<<<div_round_up(num_alive, m_num_thread), m_num_thread>>>(
           num_alive, rays_alive.view(), rays_t.view(), alive_counter.view(),
           new_i, old_i);
       CUDA_CHECK_THROW(cudaDeviceSynchronize());
       cudaMemcpy(&num_alive, &alive_counter.view()(0, 0), 1 * sizeof(int),
                  cudaMemcpyDeviceToHost);
     }
-    // std::cout << "num_alives " << num_alive << std::endl;
-
     if (num_alive <= 0) {
       break;  // exit loop if no alive rays
     }
@@ -290,42 +273,11 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
     dirs.initialize_constant(0);
     deltas.initialize_constant(0);
     // march rays
-    // if (num_alive > 1000) {
-    //   std::cout << "march rays : " << std::endl;
-    //   tlog::info() << "num_alive : " << num_alive;
-    //   tlog::info() << "num_step : " << num_step;
-    //   for (int j=0; j < 2; j++){
-    //     cudaMemcpy(&i_host_data[j], &rays_alive.view()(j, 1000), 1 * sizeof(int), cudaMemcpyDeviceToHost);
-    //   }
-    //   tlog::info() << "rays_alive : " << i_host_data[0] << "\t" << i_host_data[1];
-    //   for (int j=0; j < 2; j++){
-    //     cudaMemcpy(&host_data[j], &rays_t.view()(j, 1000), 1 * sizeof(float), cudaMemcpyDeviceToHost);
-    //   }
-    //   tlog::info() << "rays_t : " << host_data[0] << "\t" << host_data[1];
-    //   tlog::info() << "bound : " << m_bound;
-    // }
-    // cudaMemcpy(host_data, &m_density_grid.data()[66 * m_dg_h * m_dg_h + 66 * m_dg_h + 66], 3 * sizeof(float), cudaMemcpyDeviceToHost);
-    // if (num_alive > 1000){
-    //   tlog::info() << "density grid : " << host_data[0] << "\t" << host_data[1] << "\t" << host_data[2];
-    //   tlog::info() << "mean density: " << m_mean_density;
-    // }
-    kernel_march_rays<<<div_round_up(num_alive, N_THREAD), N_THREAD>>>(
+    kernel_march_rays<<<div_round_up(num_alive, m_num_thread), m_num_thread>>>(
         num_alive, num_step, rays_alive.view(), rays_t.view(), rays_o.view(),
-        rays_d.view(), m_bound, 1.0/128, m_dg_cascade, m_dg_h,
+        rays_d.view(), m_bound, m_dt_gamma, m_dg_cascade, m_dg_h,
         m_density_grid.data(), m_mean_density, nears.view(), fars.view(),
-        xyzs.view(), dirs.view(), deltas.view(), perturb, i);
-    std::cout << "march rays done!" << std::endl;
-
-    // if (num_alive > 1000) {
-    //   cudaMemcpy(host_data, &xyzs.view()(1000, 0), 3 * sizeof(float), cudaMemcpyDeviceToHost);
-    //   tlog::info() << "xyzs : "<< host_data[0] << "\t" << host_data[1] << "\t" << host_data[2];
-    //   cudaMemcpy(host_data, &dirs.view()(1000, 0), 3 * sizeof(float),
-    //            cudaMemcpyDeviceToHost);
-    //   tlog::info() << "dirs : "<< host_data[0] << "\t" << host_data[1] << "\t" << host_data[2];
-    //   cudaMemcpy(host_data, &deltas.view()(1000, 0), 2 * sizeof(float),
-    //            cudaMemcpyDeviceToHost);
-    //   tlog::info() << "deltas : "<< host_data[0] << "\t" << host_data[1];
-    // }
+        xyzs.view(), dirs.view(), deltas.view(), m_perturb, i);
 
     // volume density
     tcnn::GPUMatrixDynamic<float> sigmas(1, step_x_alive, tcnn::RM);
@@ -339,71 +291,39 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
     tcnn::GPUMatrixDynamic<precision_t> network_output(
         m_nerf_network->padded_output_width(), step_x_alive, tcnn::RM);
 
-    // do a transformer before calculating, ref. torch-ngp
-    tcnn::GPUMatrixDynamic<float> tmp_xyzs(3, step_x_alive, tcnn::CM);
-    tcnn::GPUMatrixDynamic<float> tmp_dirs(3, step_x_alive, tcnn::CM);
-    tmp_xyzs.initialize_constant(0);
-    tmp_dirs.initialize_constant(0);
     tcnn::linear_kernel(linear_transformer<float>, 0, nullptr, xyzs.n_elements(),
-      1.0/(2 * m_bound), 0.5, xyzs.data(), tmp_xyzs.data()
-      );
+      1.0/(2 * m_bound), 0.5, xyzs.data(), xyzs.data());
     tcnn::linear_kernel(linear_transformer<float>, 0, nullptr, dirs.n_elements(),
-      0.5, 0.5, dirs.data(), tmp_dirs.data()
-      );
-    concat_network_in_and_out<<<div_round_up(step_x_alive, N_THREAD),
-                                N_THREAD>>>(
-        tmp_xyzs.view(), tmp_dirs.view(),
-        network_input.view(), step_x_alive, tmp_xyzs.rows(), tmp_dirs.rows());
-    std::cout << "inference" << std::endl;
+      0.5, 0.5, dirs.data(), dirs.data());
+    concat_network_in_and_out<<<div_round_up(step_x_alive, m_num_thread),
+                                m_num_thread>>>(
+        xyzs.view(), dirs.view(),
+        network_input.view(), step_x_alive, xyzs.rows(), dirs.rows());
     // forward through the network
     m_nerf_network->inference_mixed_precision_impl(
         nullptr, network_input, network_output);
-    if (num_alive > 1000) {
-      precision_t p_host_data[4] = {0};
-      for(int j = 0; j < 4; j++){
-        cudaMemcpy(&p_host_data[j], &network_output.view()(j, 1000), 1 * sizeof(precision_t), cudaMemcpyDeviceToHost);
-      }
-      tlog::info() << "infer : " << (float) p_host_data[0] << "\t" << (float) p_host_data[1] << "\t" << (float) p_host_data[2] << "\t" << (float) p_host_data[3];
-    }
-    std::cout << "inference done" << std::endl;
 
     // decompose network output
-    decompose_network_in_and_out<<<div_round_up(step_x_alive, N_THREAD),
-                                   N_THREAD>>>(
+    decompose_network_in_and_out<<<div_round_up(step_x_alive, m_num_thread),
+                                   m_num_thread>>>(
         sigmas.view(), rgbs.view(), network_output.view(), step_x_alive,
         sigmas.rows(), rgbs.cols());
-    if (num_alive > 1000) {
-      cudaMemcpy(&host_data[0], &sigmas.view()(0, 1000), 1 * sizeof(float), cudaMemcpyDeviceToHost);
-      tlog::info() << "Infer Sigma : " << host_data[0];
-      cudaMemcpy(&host_data[0], &rgbs.view()(1000, 0), 3 * sizeof(float), cudaMemcpyDeviceToHost);
-      tlog::info() << "Infer Rgbs : " << host_data[0] << "\t" << host_data[1] << "\t" << host_data[2];
-    }
-    matrix_multiply_1x1n<<<div_round_up(step_x_alive, N_THREAD), N_THREAD>>>(
+    matrix_multiply_1x1n<<<div_round_up(step_x_alive, m_num_thread), m_num_thread>>>(
         m_density_scale, step_x_alive, sigmas.view());
 
-    std::cout << "composite rays" << std::endl;
     // composite rays
-    kernel_composite_rays<<<div_round_up(num_alive, N_THREAD), N_THREAD>>>(
+    kernel_composite_rays<<<div_round_up(num_alive, m_num_thread), m_num_thread>>>(
         num_alive, num_step, rays_alive.view(), rays_t.view(), sigmas.view(),
         rgbs.view(), deltas.view(), weight_sum.view(), depth.view(),
         image.view(), i);
-    if (num_alive > 1000) {
-      cudaMemcpy(&host_data[0], &weight_sum.view()(0, 1000), 1 * sizeof(float), cudaMemcpyDeviceToHost);
-      tlog::info() << "Weight Sum : " << host_data[0];
-      cudaMemcpy(&host_data[0], &depth.view()(0, 1000), 1 * sizeof(float), cudaMemcpyDeviceToHost);
-      tlog::info() << "Depth : " << host_data[0];
-      cudaMemcpy(&host_data[0], &image.view()(1000, 0), 3 * sizeof(float), cudaMemcpyDeviceToHost);
-          tlog::info() << "Image : " << host_data[0] << "\t" << host_data[1] << "\t" << host_data[2];
-    }
-    std::cout << "composite rays done" << std::endl;
     step += num_step;
     i += 1;
   }
   std::cout << "get image and depth" << std::endl;
   // get final image and depth
-  get_image_and_depth<<<div_round_up(N, N_THREAD), N_THREAD>>>(
+  get_image_and_depth<<<div_round_up(N, m_num_thread), m_num_thread>>>(
       image.view(), depth.view(), nears.view(), fars.view(), weight_sum.view(),
-      bg_color, N);
+      m_bg_color, N);
 
   float* deep_h = new float[N];
   float* image_h = new float[N * 3];
@@ -429,20 +349,6 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
   char const* image_file_name = "./image.png";
   stbi_write_png(deep_file_name, resolution[0], resolution[1], 1, us_depth, resolution[0] * 1);
   stbi_write_png(image_file_name, resolution[0], resolution[1], 3, us_image, resolution[0] * 3);
-
-  // Zilong
-  // Need to do
-  // 1. ray sample. refer the instant-ngp paper for details of the sample
-  // strategy. You can do it from the easiest equally spaced sampling strategy
-  // to the ray marching strategy.
-  // 2. infer and volume rendering.
-  // please refer to
-  //     1. https://github.com/ashawkey/torch-ngp/blob/main/nerf/renderer.py
-  //     line 318 ~ 380. espically the functions raymarching.compact_rays,
-  //     raymarching.march_rays and raymarching.composite_rays. These function
-  //     are places in
-  //     https://github.com/ashawkey/torch-ngp/tree/main/raymarching/src.
-  // 这里没有指定返回，后续可以再讨论返回图片是以什么格式。先渲染出来再说
 }
 
 void NerfRender::generate_rays(struct Camera cam,
@@ -450,34 +356,23 @@ void NerfRender::generate_rays(struct Camera cam,
                                Eigen::Vector2i resolution,
                                tcnn::GPUMatrixDynamic<float>& rays_o,
                                tcnn::GPUMatrixDynamic<float>& rays_d) {
-  // Weixuan
-  // Generate rays according to the input
-  // please refer to
-  //     1. https://github.com/ashawkey/torch-ngp/blob/main/nerf/provider.py
-  //     function nerf_matrix_to_ngp
-  //     2. https://github.com/ashawkey/torch-ngp/blob/main/nerf/utils.py
-  //     function get_rays
-  // use cuda to speed up
 
   int N = resolution[0] * resolution[1];  // number of pixels
   std::cout << "N: " << N << std::endl;
 
   Eigen::Matrix<float, 4, 4> new_pose = nerf_matrix_to_ngp(pos, m_scale);
 
-  int block_size = 256;
-  int grid_size = ((N + block_size) / block_size);
+  int grid_size = ((N + m_num_thread) / m_num_thread);
 
   tcnn::MatrixView<float> rays_o_view = rays_o.view();
-  set_rays_o<<<grid_size, block_size>>>(rays_o_view, new_pose.block<3, 1>(0, 3), N);
+  set_rays_o<<<grid_size, m_num_thread>>>(rays_o_view, new_pose.block<3, 1>(0, 3), N);
 
   tcnn::MatrixView<float> rays_d_view = rays_d.view();
-  set_rays_d<<<grid_size, block_size>>>(
+  set_rays_d<<<grid_size, m_num_thread>>>(
       rays_d_view, cam, new_pose.block<3, 3>(0, 0), resolution[0], N);
 }
 
 void NerfRender::generate_density_grid() {
-  // Jiang Wei
-  // once the pretrained model is loaded! we can generate the density grid.
   const uint32_t H = m_dg_h;
 	const uint32_t H2= H*H;
 	// const uint32_t H3= H*H;//*H;

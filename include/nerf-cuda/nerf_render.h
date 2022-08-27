@@ -67,9 +67,17 @@ class NerfRender {
   int m_dg_h = 128;
   float m_dg_threshould_l = 1.e-4;
   float m_mean_density = 1.e-4;
+  float m_dt_gamma = 1.0/128;
   tcnn::GPUMemory<float> m_density_grid;
   // CASCADE * H * H * H * size_of(float),
   // index calculation : cascade_level * H * H * H + nx * H * H + ny * H + nz
+
+  // infer parameters
+  int m_bg_color = 1;
+  bool m_perturb = false;
+  float m_min_near = 0.2;
+  int m_num_thread = 256;
+  int m_max_infer_steps = 1024;
 
   // Cuda Stuff
   cudaStream_t m_inference_stream;
