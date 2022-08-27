@@ -44,9 +44,9 @@ __global__ void set_rays_d(MatrixView<float> rays_d, struct Camera cam,
     directions = directions / directions.norm();
     Eigen::Vector3f ray_d = pose * directions;
 
-    rays_d(tid, 0) = ray_d[0];
-    rays_d(tid, 1) = ray_d[1];
-    rays_d(tid, 2) = ray_d[2];
+    rays_d(0, tid) = ray_d[0];
+    rays_d(1, tid) = ray_d[1];
+    rays_d(2, tid) = ray_d[2];
   }
 }
 
@@ -58,9 +58,9 @@ __global__ void set_rays_o(MatrixView<float> rays_o, Eigen::Vector3f ray_o,
   for (int tid = indexWithinTheGrid; tid < N; tid += gridStride) {
     // rays_o = rays_o[..., None, :].expand_as(rays_d) # [B, N, 3] @ function
     // get_rays
-    rays_o(tid, 0) = ray_o[0];
-    rays_o(tid, 1) = ray_o[1];
-    rays_o(tid, 2) = ray_o[2];
+    rays_o(0, tid) = ray_o[0];
+    rays_o(1, tid) = ray_o[1];
+    rays_o(2, tid) = ray_o[2];
   }
 }
 
@@ -335,7 +335,7 @@ __global__ void decompose_network_in_and_out(
 // nears/fars: [N]
 __global__ void kernel_near_far_from_aabb(
     tcnn::MatrixView<float> rays_o, tcnn::MatrixView<float> rays_d,
-    tcnn::MatrixView<float> aabb, const uint32_t N, const float min_near,
+    float* aabb, const uint32_t N, const float min_near,
     tcnn::MatrixView<float> nears, tcnn::MatrixView<float> fars) {
   // rays_o:float, [N, 3]
   // rays_d: float, [N, 3]
@@ -349,17 +349,17 @@ __global__ void kernel_near_far_from_aabb(
   int gridStride = gridDim.x * blockDim.x;
   // use the grid-stride-loops
   for (int n = indexWithinTheGrid; n < N; n += gridStride) {
-    const float ox = rays_o(n, 0), oy = rays_o(n, 1), oz = rays_o(n, 2);
-    const float dx = rays_d(n, 0), dy = rays_d(n, 1), dz = rays_d(n, 2);
+    const float ox = rays_o(0, n), oy = rays_o(1, n), oz = rays_o(2, n);
+    const float dx = rays_d(0, n), dy = rays_d(1, n), dz = rays_d(2, n);
     const float rdx = 1 / dx, rdy = 1 / dy, rdz = 1 / dz;
 
     // get near far (assume cube scene)
-    float near = (aabb(0, 0) - ox) * rdx;
-    float far = (aabb(0, 3) - ox) * rdx;
+    float near = (aabb[0] - ox) * rdx;
+    float far = (aabb[3] - ox) * rdx;
     if (near > far) swapf(near, far);
 
-    float near_y = (aabb(0, 1) - oy) * rdy;
-    float far_y = (aabb(0, 4) - oy) * rdy;
+    float near_y = (aabb[1] - oy) * rdy;
+    float far_y = (aabb[4] - oy) * rdy;
     if (near_y > far_y) swapf(near_y, far_y);
 
     if (near > far_y || near_y > far) {
@@ -370,8 +370,8 @@ __global__ void kernel_near_far_from_aabb(
     if (near_y > near) near = near_y;
     if (far_y < far) far = far_y;
 
-    float near_z = (aabb(0, 2) - oz) * rdz;
-    float far_z = (aabb(0, 5) - oz) * rdz;
+    float near_z = (aabb[2] - oz) * rdz;
+    float far_z = (aabb[5] - oz) * rdz;
     if (near_z > far_z) swapf(near_z, far_z);
 
     if (near > far_z || near_z > far) {
@@ -533,8 +533,8 @@ __global__ void kernel_march_rays(
   // n_step: the compact steps  int
   // rays_alive_view: the alive rays's ID   int, [2,N]
   // rays_t_view: the alive rays's time float, [2,N]
-  // rays_o_view:float, [N, 3]
-  // rays_d_view: float, [N, 3]
+  // rays_o_view:float, [3, N]
+  // rays_d_view: float, [3, N]
   // bound: float, scalar
   // dt_gamma: the density threshould float
   // C: grid cascade int
@@ -542,9 +542,9 @@ __global__ void kernel_march_rays(
   // grid: density grid float, [C* H* H* H]
   // mean_density: float, scalar
   // nears_view/fars_view: float, [N]
-  //  xyzs: float, [n_alive * n_step, 3], all generated points' coords
-  //  dirs: float, [n_alive * n_step, 3], all generated points' view dirs.
-  //  deltas: float, [n_alive * n_step, 2], all generated points' deltas
+  //  xyzs: float, [3, n_alive * n_step], all generated points' coords
+  //  dirs: float, [3, n_alive * n_step], all generated points' view dirs.
+  //  deltas: float, [2, n_alive * n_step], all generated points' deltas
   // perturb: bool/int, int > 0 is used as the random seed.
   // i: used for index new/old  int
   const uint32_t indexWithinTheGrid = threadIdx.x + blockIdx.x * blockDim.x;
@@ -567,10 +567,10 @@ __global__ void kernel_march_rays(
     //   dirs += n * n_step * 3;
     //   deltas += n * n_step * 2;
 
-    const float ox = rays_o_view(index, 0), oy = rays_o_view(index, 1),
-                oz = rays_o_view(index, 2);
-    const float dx = rays_d_view(index, 0), dy = rays_d_view(index, 1),
-                dz = rays_d_view(index, 2);
+    const float ox = rays_o_view(0, index), oy = rays_o_view(1, index),
+                oz = rays_o_view(2, index);
+    const float dx = rays_d_view(0, index), dy = rays_d_view(1, index),
+                dz = rays_d_view(2, index);
     const float rdx = 1 / dx, rdy = 1 / dy, rdz = 1 / dz;
     const float near = nears_view(0, index), far = fars_view(0, index);
 
@@ -616,17 +616,17 @@ __global__ void kernel_march_rays(
       // if occpuied, advance a small step, and write to output
       if (density > density_thresh) {
         // write step
-        xyzs_view(xyzs_loc, 0) = x;
-        xyzs_view(xyzs_loc, 1) = y;
-        xyzs_view(xyzs_loc, 2) = z;
-        dirs_view(dirs_loc, 0) = dx;
-        dirs_view(dirs_loc, 1) = dy;
-        dirs_view(dirs_loc, 2) = dz;
+        xyzs_view(0, xyzs_loc) = x;
+        xyzs_view(1, xyzs_loc) = y;
+        xyzs_view(2, xyzs_loc) = z;
+        dirs_view(0, dirs_loc) = dx;
+        dirs_view(1, dirs_loc) = dy;
+        dirs_view(2, dirs_loc) = dz;
         // calc dt
         const float dt = clamp(t * dt_gamma, dt_min, dt_max);
         t += dt;
-        deltas_view(deltas_loc, 0) = dt;
-        deltas_view(deltas_loc, 1) = t - last_t;  // used to calc depth
+        deltas_view(0, deltas_loc) = dt;
+        deltas_view(1, deltas_loc) = t - last_t;  // used to calc depth
         last_t = t;
         // step
         xyzs_loc += 1;
@@ -665,7 +665,7 @@ __global__ void kernel_composite_rays(
   // rays_t_view: the alive rays's time float, [2,N]
   // sigmas: float, [n_alive * n_step,]
   // rgbs: float, [n_alive * n_step, 3]
-  // deltas: float, [n_alive * n_step, 2], all generated points' deltas
+  // deltas: float, [2, n_alive * n_step], all generated points' deltas
   // weights_sum: float, [N,], the alpha channel
   // depth: float, [N,], the depth value
   // image: float, [N, 3], the RGB channel (after multiplying alpha!)
@@ -696,10 +696,10 @@ __global__ void kernel_composite_rays(
     uint32_t step = 0;
     while (step < n_step) {
       // ray is terminated if delta == 0
-      if (deltas(deltas_loc, 0) == 0) break;
+      if (deltas(0, deltas_loc) == 0) break;
 
       const float alpha =
-          1.0f - __expf(-sigmas(0, sigmas_loc) * deltas(0, sigmas_loc));
+          1.0f - __expf(-sigmas(0, sigmas_loc) * deltas(sigmas_loc, 0));
 
       /*
       T_0 = 1; T_i = \prod_{j=0}^{i-1} (1 - alpha_j)
@@ -711,7 +711,7 @@ __global__ void kernel_composite_rays(
       const float weight = alpha * T;
       weight_sum += weight;
 
-      t += deltas(deltas_loc, 1);  // real delta
+      t += deltas(1, deltas_loc);  // real delta
       d += weight * t;
       r += weight * rgbs(rgbs_loc, 0);
       g += weight * rgbs(rgbs_loc, 1);
