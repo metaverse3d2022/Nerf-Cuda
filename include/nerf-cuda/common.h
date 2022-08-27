@@ -66,4 +66,18 @@ struct Camera {
     float cy;
 };
 
+struct Image {
+	int W;
+	int H;
+	unsigned char* rgb;       // W * H * 3
+	unsigned char* depth;     // W * H
+
+	Image(int w, int h, unsigned char* in_rgb, unsigned char* in_depth)
+	{
+		W = w;
+		H = h;
+		rgb = in_rgb;
+		depth = in_depth;
+	}
+};
 NGP_NAMESPACE_END

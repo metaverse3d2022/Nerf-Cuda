@@ -38,7 +38,7 @@ class NerfRender {
   void reset_network();  // reset the network according to the network config.
 
   // render !
-  void render_frame(
+  Image render_frame(
       struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
       Eigen::Vector2i resolution);  // render an image according to camera inner
                                     // parameters and outer parameters.

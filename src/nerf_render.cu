@@ -5,8 +5,6 @@
 #include <nerf-cuda/nerf_network.h>
 #include <nerf-cuda/nerf_render.h>
 #include <nerf-cuda/render_utils.h>
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include <stb_image/stb_image_write.h>
 #include <tiny-cuda-nn/encodings/grid.h>
 #include <tiny-cuda-nn/gpu_matrix.h>
 #include <tiny-cuda-nn/gpu_memory.h>
@@ -167,7 +165,7 @@ void NerfRender::reset_network() {
       encoding_config, dir_encoding_config, network_config, rgb_network_config);
 }
 
-void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
+Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
                               Eigen::Vector2i resolution) {
   // cam : parameters of cam
   // pos : camera external parameters
@@ -219,13 +217,14 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
   rays_t.initialize_constant(0);
   std::cout << "initial alive_counter rays_alive rays_t with 0" << std::endl;
 
-  //   // all generated points' coords
-  //   tcnn::GPUMatrixDynamic<float> xyzs(num_alive, 3, tcnn::RM);
-  //   // all generated points' view dirs.
-  //   tcnn::GPUMatrixDynamic<float> dirs(num_alive, 3, tcnn::RM);
-  //   // all generated points' deltas
-  //   //(here we record two deltas, the first is for RGB, the second for
-  //   depth). tcnn::GPUMatrixDynamic<float> deltas(num_alive, 2, tcnn::RM);
+
+  tcnn::GPUMatrixDynamic<float> xyzs(3, div_round_up(N, 128) * 128, tcnn::CM);
+  // all generated points' view dirs.
+  tcnn::GPUMatrixDynamic<float> dirs(3, div_round_up(N, 128) * 128, tcnn::CM);
+  // all generated points' deltas
+  //(here we record two deltas, the first is for RGB, the second for depth).
+  tcnn::GPUMatrixDynamic<float> deltas(2, div_round_up(N, 128) * 128, tcnn::CM);
+
 
   int step = 0;          // the current march step
   int i = 0;             // the flag to index old and new rays
@@ -260,18 +259,6 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
     // round it to the multiply of 128
     int step_x_alive = div_round_up(num_alive * num_step, 128) * 128;
 
-    //   all generated points' coords
-    tcnn::GPUMatrixDynamic<float> xyzs(3, step_x_alive, tcnn::CM);
-    // all generated points' view dirs.
-    tcnn::GPUMatrixDynamic<float> dirs(3, step_x_alive, tcnn::CM);
-    // all generated points' deltas
-    //(here we record two deltas, the first is for RGB, the second for depth).
-    tcnn::GPUMatrixDynamic<float> deltas(2, step_x_alive, tcnn::CM);
-
-    // init it
-    xyzs.initialize_constant(0);
-    dirs.initialize_constant(0);
-    deltas.initialize_constant(0);
     // march rays
     kernel_march_rays<<<div_round_up(num_alive, m_num_thread), m_num_thread>>>(
         num_alive, num_step, rays_alive.view(), rays_t.view(), rays_o.view(),
@@ -291,9 +278,9 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
     tcnn::GPUMatrixDynamic<precision_t> network_output(
         m_nerf_network->padded_output_width(), step_x_alive, tcnn::RM);
 
-    tcnn::linear_kernel(linear_transformer<float>, 0, nullptr, xyzs.n_elements(),
+    tcnn::linear_kernel(linear_transformer<float>, 0, nullptr, step_x_alive * 3,
       1.0/(2 * m_bound), 0.5, xyzs.data(), xyzs.data());
-    tcnn::linear_kernel(linear_transformer<float>, 0, nullptr, dirs.n_elements(),
+    tcnn::linear_kernel(linear_transformer<float>, 0, nullptr, step_x_alive * 3,
       0.5, 0.5, dirs.data(), dirs.data());
     concat_network_in_and_out<<<div_round_up(step_x_alive, m_num_thread),
                                 m_num_thread>>>(
@@ -330,25 +317,19 @@ void NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
   unsigned char us_image[N*3];
   unsigned char us_depth[N];
 
-  cudaMemcpy(deep_h, &depth.view()(0, 0), N * sizeof(float),
-             cudaMemcpyDeviceToHost);
-  cudaMemcpy(image_h, &image.view()(0, 0), N * sizeof(float) * 3,
-             cudaMemcpyDeviceToHost);
+  cudaMemcpy(deep_h, &depth.view()(0, 0), N * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpy(image_h, &image.view()(0, 0), N * sizeof(float) * 3, cudaMemcpyDeviceToHost);
+  
   for (int i = 0; i < N ; i++) {
     us_depth[i] = (unsigned char) (255.0 * deep_h[i]);
   }
   for (int i = 0; i < N * 3; i++) {
-    us_image[i] = (unsigned char) (255.0 * image_h[i]);
+    us_image[i] = (unsigned char) (255.0 * image_h[i]);        
   }
-  
 
-  std::cout << "deep  " << us_depth[1] << std::endl;
-  std::cout << "image " << us_image[1] << std::endl;
-  // store images
-  char const* deep_file_name = "./deep.png";
-  char const* image_file_name = "./image.png";
-  stbi_write_png(deep_file_name, resolution[0], resolution[1], 1, us_depth, resolution[0] * 1);
-  stbi_write_png(image_file_name, resolution[0], resolution[1], 3, us_image, resolution[0] * 3);
+
+  Image img(resolution[0], resolution[1], us_image, us_depth);
+  return img;
 }
 
 void NerfRender::generate_rays(struct Camera cam,
