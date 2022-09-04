@@ -19,6 +19,7 @@
 #include <set>
 #include <typeinfo>
 #include <vector>
+#include "omp.h"
 
 using namespace Eigen;
 using namespace tcnn;
@@ -164,35 +165,74 @@ void NerfRender::reset_network() {
       encoding_config, dir_encoding_config, network_config, rgb_network_config);
 }
 
-Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
-                              Eigen::Vector2i resolution) {
+void NerfRender::set_resolution(Eigen::Vector2i res)
+{
+  resolution = res;
+
+  int N = resolution[0] * resolution[1];  // number of pixels
+  // initial points corresponding to pixels, in world coordination
+  rays_o = tcnn::GPUMatrixDynamic<float>(3, N, tcnn::RM);
+  // direction corresponding to pixels,in world coordination
+  rays_d = tcnn::GPUMatrixDynamic<float>(3, N, tcnn::RM);
+  // Calculate rays' intersection time (near and far) with aabb
+  nears = tcnn::GPUMatrixDynamic<float>(1, N, tcnn::RM);
+  fars = tcnn::GPUMatrixDynamic<float>(1, N, tcnn::RM);
+  //  allocate outputs
+  weight_sum = tcnn::GPUMatrixDynamic<float>(1, N, tcnn::RM);  // the accumlate weight of each ray
+  depth = tcnn::GPUMatrixDynamic<float>(1, N, tcnn::RM);  // output depth img
+  image = tcnn::GPUMatrixDynamic<float>(N, 3, tcnn::RM);  // output rgb image
+  // store the alive rays number
+  alive_counter = tcnn::GPUMatrixDynamic<int>(1, 1, tcnn::RM);
+  // the alive rays' IDs in N (N >= n_alive, but we only use first n_alive)
+  // 2 is used to loop old/new
+  rays_alive = tcnn::GPUMatrixDynamic<int>(2, N, tcnn::RM);
+  // the alive rays' time, we only use the first n_alive.
+  // dead rays are marked by rays_t < 0
+  //  2 is used to loop old/new
+  rays_t = tcnn::GPUMatrixDynamic<float>(2, N, tcnn::RM);
+
+  xyzs = tcnn::GPUMatrixDynamic<float>(3, div_round_up(N, 128) * 128, tcnn::CM);
+  // all generated points' view dirs.
+  dirs = tcnn::GPUMatrixDynamic<float>(3, div_round_up(N, 128) * 128, tcnn::CM);
+  // all generated points' deltas
+  //(here we record two deltas, the first is for RGB, the second for depth).
+  deltas = tcnn::GPUMatrixDynamic<float>(2, div_round_up(N, 128) * 128, tcnn::CM);
+
+  // volume density
+  sigmas = tcnn::GPUMatrixDynamic<float>(1, div_round_up(N, 128) * 128, tcnn::RM);
+  // emitted color
+  rgbs = tcnn::GPUMatrixDynamic<float>(div_round_up(N, 128) * 128, 3, tcnn::RM);
+
+  // concated input
+  network_input = tcnn::GPUMatrixDynamic<float>(m_nerf_network->input_width(),
+                                                div_round_up(N, 128) * 128, tcnn::RM);
+  // concated output
+  network_output = tcnn::GPUMatrixDynamic<precision_t>(
+        m_nerf_network->padded_output_width(), div_round_up(N, 128) * 128, tcnn::RM);
+  
+  deep_h = new float[N];
+  image_h = new float[N * 3];
+  us_image = new unsigned char [N*3];
+  us_depth = new unsigned char [N];
+}
+
+Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos) {
   // cam : parameters of cam
   // pos : camera external parameters
   // resolution : [Width, Height]
 
   int N = resolution[0] * resolution[1];  // number of pixels
-  // initial points corresponding to pixels, in world coordination
-  tcnn::GPUMatrixDynamic<float> rays_o(3, N, tcnn::RM);
-  // direction corresponding to pixels,in world coordination
-  tcnn::GPUMatrixDynamic<float> rays_d(3, N, tcnn::RM);
 
   // functions to generate rays_o and rays_d, it takes camera parameters and
   // resolution as input
   generate_rays(cam, pos, resolution, rays_o, rays_d);
 
-  // Calculate rays' intersection time (near and far) with aabb
-  tcnn::GPUMatrixDynamic<float> nears(1, N, tcnn::RM);
-  tcnn::GPUMatrixDynamic<float> fars(1, N, tcnn::RM);
 
   // caliucate nears and fars
   kernel_near_far_from_aabb<<<div_round_up(N, m_num_thread), m_num_thread>>>(
       rays_o.view(), rays_d.view(), m_aabb.data(), N, m_min_near, nears.view(),
       fars.view());
 
-  //  allocate outputs
-  tcnn::GPUMatrixDynamic<float> weight_sum(1, N, tcnn::RM);  // the accumlate weight of each ray
-  tcnn::GPUMatrixDynamic<float> depth(1, N, tcnn::RM);  // output depth img
-  tcnn::GPUMatrixDynamic<float> image(N, 3, tcnn::RM);  // output rgb image
   // initial weight_sum, image and depth with 0
   weight_sum.initialize_constant(0); 
   depth.initialize_constant(0);
@@ -200,42 +240,11 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
   std::cout << "initial weight_sum, image and depth with 0" << std::endl;
 
   int num_alive = N;  // initialize the initial number alive as N
-
-  // store the alive rays number
-  tcnn::GPUMatrixDynamic<int> alive_counter(1, 1, tcnn::RM);
-  // the alive rays' IDs in N (N >= n_alive, but we only use first n_alive)
-  // 2 is used to loop old/new
-  tcnn::GPUMatrixDynamic<int> rays_alive(2, num_alive, tcnn::RM);
-  // the alive rays' time, we only use the first n_alive.
-  // dead rays are marked by rays_t < 0
-  //  2 is used to loop old/new
-  tcnn::GPUMatrixDynamic<float> rays_t(2, num_alive, tcnn::RM);
   // initial with 0
   alive_counter.initialize_constant(0);
   rays_alive.initialize_constant(0);
   rays_t.initialize_constant(0);
   std::cout << "initial alive_counter rays_alive rays_t with 0" << std::endl;
-
-
-  tcnn::GPUMatrixDynamic<float> xyzs(3, div_round_up(N, 128) * 128, tcnn::CM);
-  // all generated points' view dirs.
-  tcnn::GPUMatrixDynamic<float> dirs(3, div_round_up(N, 128) * 128, tcnn::CM);
-  // all generated points' deltas
-  //(here we record two deltas, the first is for RGB, the second for depth).
-  tcnn::GPUMatrixDynamic<float> deltas(2, div_round_up(N, 128) * 128, tcnn::CM);
-
-  // volume density
-  tcnn::GPUMatrixDynamic<float> sigmas(1, div_round_up(N, 128) * 128, tcnn::RM);
-  // emitted color
-  tcnn::GPUMatrixDynamic<float> rgbs(div_round_up(N, 128) * 128, 3, tcnn::RM);
-
-  // concated input
-  tcnn::GPUMatrixDynamic<float> network_input(m_nerf_network->input_width(),
-                                                div_round_up(N, 128) * 128, tcnn::RM);
-  // concated output
-  tcnn::GPUMatrixDynamic<precision_t> network_output(
-        m_nerf_network->padded_output_width(), div_round_up(N, 128) * 128, tcnn::RM);
-
 
   int step = 0;          // the current march step
   int i = 0;             // the flag to index old and new rays
@@ -310,21 +319,16 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
       image.view(), depth.view(), nears.view(), fars.view(), weight_sum.view(),
       m_bg_color, N);
 
-  float* deep_h = new float[N];
-  float* image_h = new float[N * 3];
-  unsigned char us_image[N*3];
-  unsigned char us_depth[N];
-
   cudaMemcpy(deep_h, &depth.view()(0, 0), N * sizeof(float), cudaMemcpyDeviceToHost);
   cudaMemcpy(image_h, &image.view()(0, 0), N * sizeof(float) * 3, cudaMemcpyDeviceToHost);
   
+  #pragma omp parallel for num_threads(8)
   for (int i = 0; i < N ; i++) {
     us_depth[i] = (unsigned char) (255.0 * deep_h[i]);
+    us_image[i*3] = (unsigned char) (255.0 * image_h[i*3]); 
+    us_image[i*3+1] = (unsigned char) (255.0 * image_h[i*3+1]); 
+    us_image[i*3+2] = (unsigned char) (255.0 * image_h[i*3+2]); 
   }
-  for (int i = 0; i < N * 3; i++) {
-    us_image[i] = (unsigned char) (255.0 * image_h[i]);        
-  }
-
 
   Image img(resolution[0], resolution[1], us_image, us_depth);
   return img;

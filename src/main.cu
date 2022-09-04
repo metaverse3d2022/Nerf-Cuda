@@ -36,6 +36,7 @@ namespace fs = ::filesystem;
 
 int main(int argc, char** argv) {
 
+  cudaSetDevice(2);
   cout << "Hello, Metavese!" << endl;
   NerfRender* render = new NerfRender();
   string config_path = "../result/nerf/test.msgpack";
@@ -46,8 +47,9 @@ int main(int argc, char** argv) {
       0.4464189982715247, -0.03675452191179031, -0.8940689141475064, -5.4794898611466945,
       -0.062425682580756266, 0.995442519072023, -0.07209178487538156, -0.9791660699008925,
       0.0, 0.0, 0.0, 1.0;
-  Eigen::Vector2i resolution(1080, 1920);
-  Image img = render->render_frame(cam, pos, resolution);
+  Eigen::Vector2i resolution(1080, 1080);
+  render -> set_resolution(resolution);
+  Image img = render->render_frame(cam, pos);
   // store images
   char const* deep_file_name = "./deep.png";
   char const* image_file_name = "./image.png";

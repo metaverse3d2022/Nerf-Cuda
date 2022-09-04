@@ -38,9 +38,9 @@ class NerfRender {
   void reset_network();  // reset the network according to the network config.
 
   // render !
+  void set_resolution(Eigen::Vector2i resolution);
   Image render_frame(
-      struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
-      Eigen::Vector2i resolution);  // render an image according to camera inner
+      struct Camera cam, Eigen::Matrix<float, 4, 4> pos);  // render an image according to camera inner
                                     // parameters and outer parameters.
 
   void generate_rays(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
@@ -76,8 +76,53 @@ class NerfRender {
   int m_bg_color = 1;
   bool m_perturb = false;
   float m_min_near = 0.2;
-  int m_num_thread = 256;
+  int m_num_thread = 128;
   int m_max_infer_steps = 1024;
+
+  // middle variable
+  Eigen::Vector2i resolution;
+  // initial points corresponding to pixels, in world coordination
+  tcnn::GPUMatrixDynamic<float> rays_o;
+  // direction corresponding to pixels,in world coordination
+  tcnn::GPUMatrixDynamic<float> rays_d;
+  // Calculate rays' intersection time (near and far) with aabb
+  tcnn::GPUMatrixDynamic<float> nears;
+  tcnn::GPUMatrixDynamic<float> fars;
+  //  allocate outputs
+  tcnn::GPUMatrixDynamic<float> weight_sum;  // the accumlate weight of each ray
+  tcnn::GPUMatrixDynamic<float> depth;  // output depth img
+  tcnn::GPUMatrixDynamic<float> image;  // output rgb image
+  // store the alive rays number
+  tcnn::GPUMatrixDynamic<int> alive_counter;
+  // the alive rays' IDs in N (N >= n_alive, but we only use first n_alive)
+  // 2 is used to loop old/new
+  tcnn::GPUMatrixDynamic<int> rays_alive;
+  // the alive rays' time, we only use the first n_alive.
+  // dead rays are marked by rays_t < 0
+  //  2 is used to loop old/new
+  tcnn::GPUMatrixDynamic<float> rays_t;
+  tcnn::GPUMatrixDynamic<float> xyzs;
+  // all generated points' view dirs.
+  tcnn::GPUMatrixDynamic<float> dirs;
+  // all generated points' deltas
+  //(here we record two deltas, the first is for RGB, the second for depth).
+  tcnn::GPUMatrixDynamic<float> deltas;
+
+  // volume density
+  tcnn::GPUMatrixDynamic<float> sigmas;
+  // emitted color
+  tcnn::GPUMatrixDynamic<float> rgbs;
+
+  // concated input
+  tcnn::GPUMatrixDynamic<float> network_input;
+  // concated output
+  tcnn::GPUMatrixDynamic<precision_t> network_output;
+
+  float* deep_h;
+  float* image_h;
+  unsigned char* us_image;
+  unsigned char* us_depth;
+
 
   // Cuda Stuff
   cudaStream_t m_inference_stream;
