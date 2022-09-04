@@ -44,7 +44,6 @@ json merge_parent_network_config(const json& child,
 
 NerfRender::NerfRender() {
   m_network_config = {};
-  CUDA_CHECK_THROW(cudaStreamCreate(&m_inference_stream));
   m_density_grid = GPUMemory<float>(1);
 }
 
@@ -160,7 +159,7 @@ void NerfRender::reset_network() {
   // Generate the network
   m_nerf_network = std::make_shared<NerfNetwork<precision_t>>(
       n_pos_dims, n_dir_dims, n_extra_dims,
-      n_pos_dims + 1,  // The offset of 1 comes from the dt member variable of
+      n_pos_dims,  // The offset of 1 comes from the dt member variable of
                        // NerfCoordinate. HACKY
       encoding_config, dir_encoding_config, network_config, rgb_network_config);
 }
@@ -225,6 +224,18 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
   //(here we record two deltas, the first is for RGB, the second for depth).
   tcnn::GPUMatrixDynamic<float> deltas(2, div_round_up(N, 128) * 128, tcnn::CM);
 
+  // volume density
+  tcnn::GPUMatrixDynamic<float> sigmas(1, div_round_up(N, 128) * 128, tcnn::RM);
+  // emitted color
+  tcnn::GPUMatrixDynamic<float> rgbs(div_round_up(N, 128) * 128, 3, tcnn::RM);
+
+  // concated input
+  tcnn::GPUMatrixDynamic<float> network_input(m_nerf_network->input_width(),
+                                                div_round_up(N, 128) * 128, tcnn::RM);
+  // concated output
+  tcnn::GPUMatrixDynamic<precision_t> network_output(
+        m_nerf_network->padded_output_width(), div_round_up(N, 128) * 128, tcnn::RM);
+
 
   int step = 0;          // the current march step
   int i = 0;             // the flag to index old and new rays
@@ -246,7 +257,6 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
       kernel_compact_rays<<<div_round_up(num_alive, m_num_thread), m_num_thread>>>(
           num_alive, rays_alive.view(), rays_t.view(), alive_counter.view(),
           new_i, old_i);
-      CUDA_CHECK_THROW(cudaDeviceSynchronize());
       cudaMemcpy(&num_alive, &alive_counter.view()(0, 0), 1 * sizeof(int),
                  cudaMemcpyDeviceToHost);
     }
@@ -265,18 +275,6 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
         rays_d.view(), m_bound, m_dt_gamma, m_dg_cascade, m_dg_h,
         m_density_grid.data(), m_mean_density, nears.view(), fars.view(),
         xyzs.view(), dirs.view(), deltas.view(), m_perturb, i);
-
-    // volume density
-    tcnn::GPUMatrixDynamic<float> sigmas(1, step_x_alive, tcnn::RM);
-    // emitted color
-    tcnn::GPUMatrixDynamic<float> rgbs(step_x_alive, 3, tcnn::RM);
-
-    // concated input
-    tcnn::GPUMatrixDynamic<float> network_input(m_nerf_network->input_width(),
-                                                step_x_alive, tcnn::RM);
-    // concated output
-    tcnn::GPUMatrixDynamic<precision_t> network_output(
-        m_nerf_network->padded_output_width(), step_x_alive, tcnn::RM);
 
     tcnn::linear_kernel(linear_transformer<float>, 0, nullptr, step_x_alive * 3,
       1.0/(2 * m_bound), 0.5, xyzs.data(), xyzs.data());

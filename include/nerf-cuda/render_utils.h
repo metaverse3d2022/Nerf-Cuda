@@ -297,7 +297,7 @@ __global__ void concat_network_in_and_out(
       if (i < rows_a) {
         concat_result(i, n) = a(i, n);
       } else {
-        concat_result(i+1, n) = b(i - rows_a, n);
+        concat_result(i, n) = b(i - rows_a, n);
       }
     }
   }
