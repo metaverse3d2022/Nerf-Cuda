@@ -1,24 +1,30 @@
 /***************************************************************************************************
- * Copyright (c) 2017-2021, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2017 - 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
- * Redistribution and use in source and binary forms, with or without modification, are permitted
- * provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright notice, this list of
- *       conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright notice, this list of
- *       conditions and the following disclaimer in the documentation and/or other materials
- *       provided with the distribution.
- *     * Neither the name of the NVIDIA CORPORATION nor the names of its contributors may be used
- *       to endorse or promote products derived from this software without specific prior written
- *       permission.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
- * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ * list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ * this list of conditions and the following disclaimer in the documentation
+ * and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its
+ * contributors may be used to endorse or promote products derived from
+ * this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  **************************************************************************************************/
@@ -73,6 +79,8 @@ struct B2bGemm {
     typename B2bMma::IteratorB0::TensorRef ref_B0;
     typename Epilogue::OutputTileIterator::Params params_C0;
     typename Epilogue::OutputTileIterator::TensorRef ref_C0;
+    typename B2bMma::IteratorAccumulatorScaleBias::TensorRef ref_Scale0;
+    typename B2bMma::IteratorAccumulatorScaleBias::TensorRef ref_Bias0;
     typename B2bMma::IteratorB1::Params params_B1;
     typename B2bMma::IteratorB1::TensorRef ref_B1;
     typename Epilogue::OutputTileIterator::Params params_C1;
@@ -103,6 +111,8 @@ struct B2bGemm {
       typename B2bMma::IteratorA0::TensorRef ref_A0,
       typename B2bMma::IteratorB0::TensorRef ref_B0,
       typename Epilogue::OutputTileIterator::TensorRef ref_C0,
+      typename B2bMma::IteratorAccumulatorScaleBias::TensorRef ref_Scale0,
+      typename B2bMma::IteratorAccumulatorScaleBias::TensorRef ref_Bias0,
       typename B2bMma::IteratorB1::TensorRef ref_B1,
       typename Epilogue::OutputTileIterator::TensorRef ref_C1,
       typename Epilogue::OutputTileIterator::TensorRef ref_D1,
@@ -120,6 +130,8 @@ struct B2bGemm {
       ref_B0(ref_B0),
       params_C0(ref_C0.layout()),
       ref_C0(ref_C0),
+      ref_Scale0(ref_Scale0),
+      ref_Bias0(ref_Bias0),
       params_B1(ref_B1.layout()),
       ref_B1(ref_B1),
       params_C1(ref_C1.layout()),
@@ -201,6 +213,19 @@ struct B2bGemm {
 
       return Status::kErrorMisalignedOperand;
     }
+
+    // Determine if fusion sizes are valid
+    if(problem_size_0.m() != problem_size_1.m())
+      return Status::kErrorInvalidProblem;
+
+    if(problem_size_0.n() != problem_size_1.k())
+      return Status::kErrorInvalidProblem;
+
+    if(problem_size_0.n() > B2bMma::Shape0::kN)
+      return Status::kErrorInvalidProblem;
+    
+    if(problem_size_1.n() > B2bMma::Shape1::kN)
+      return Status::kErrorInvalidProblem;
 
     return Status::kSuccess;
   }
@@ -286,6 +311,29 @@ struct B2bGemm {
     int warp_idx = __shfl_sync(0x1f, threadIdx.x / 32, 0);
     int lane_idx = threadIdx.x % 32;
 
+    // Construct iterators to accumulator scale/bias vector
+    typename B2bMma::IteratorAccumulatorScaleBias iterator_Scale0(
+      params.ref_Scale0.data(),
+      {1, params.problem_size_0.n()},
+      thread_idx,
+      warp_idx,
+      MatrixCoord(
+        0, threadblock_tile_offset.n() * B2bMma::Shape0::kN
+      )
+    );
+
+    typename B2bMma::IteratorAccumulatorScaleBias iterator_Bias0(
+      params.ref_Bias0.data(),
+      {1, params.problem_size_0.n()},
+      thread_idx,
+      warp_idx,
+      MatrixCoord(
+        0, threadblock_tile_offset.n() * B2bMma::Shape0::kN
+      )
+    );
+
+
+
     //
     // Main loop
     //
@@ -303,7 +351,8 @@ struct B2bGemm {
 
     if (!kSplitKSerial || gemm_k_iterations_0 > 0) {
       // Compute threadblock-scoped matrix multiply-add
-      b2bMma(gemm_k_iterations_0, accumulators, iterator_A0, iterator_B0, iterator_B1, src_accum, output_op_0);
+      b2bMma(gemm_k_iterations_0, accumulators, iterator_A0, iterator_B0,
+        iterator_Scale0, iterator_Bias0, iterator_B1, src_accum, output_op_0);
     }
 
     //

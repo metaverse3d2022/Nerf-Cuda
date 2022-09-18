@@ -1,24 +1,30 @@
 /***************************************************************************************************
- * Copyright (c) 2017-2021, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2017 - 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
- * Redistribution and use in source and binary forms, with or without modification, are permitted
- * provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright notice, this list of
- *       conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright notice, this list of
- *       conditions and the following disclaimer in the documentation and/or other materials
- *       provided with the distribution.
- *     * Neither the name of the NVIDIA CORPORATION nor the names of its contributors may be used
- *       to endorse or promote products derived from this software without specific prior written
- *       permission.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
- * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ * list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ * this list of conditions and the following disclaimer in the documentation
+ * and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its
+ * contributors may be used to endorse or promote products derived from
+ * this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  **************************************************************************************************/
@@ -76,9 +82,7 @@ __global__ void Conv2dFprop(
   TensorRef<ElementC, LayoutC> tensor_y_in,
   TensorRef<ElementC, LayoutC> tensor_y_out,
   ElementCompute alpha,
-  ElementCompute beta,
-  TensorRef<ElementCompute, layout::RowMajor> tensor_scale,
-  TensorRef<ElementCompute, layout::RowMajor> tensor_bias
+  ElementCompute beta
   ) {
 
   ConvertOp convert_op;
@@ -180,26 +184,13 @@ __global__ void Conv2dFprop(
         int thread_k = k_start + n;
         if (thread_k < problem_size.K) {
 
-          if(alpha == ElementCompute()) { // use per-channel scale and bias
-            ElementCompute scale = tensor_scale.at({0, thread_k});
-            ElementCompute bias = tensor_bias.at({0, thread_k});
-            tensor_y_out.at({thread_n[m], thread_p[m], thread_q[m], thread_k}) = convert_op(
-              scale * ElementCompute(accum[m][n]) + bias);
+          ElementCompute c_ref = ElementCompute();
+          if (beta != ElementCompute()) {
+            c_ref = ElementCompute(tensor_y_in.at({thread_n[m], thread_p[m], thread_q[m], thread_k}));
           }
-          else if(tensor_bias.good()) { // use per-channel bias
-            ElementCompute bias = tensor_bias.at({0, thread_k});
-            tensor_y_out.at({thread_n[m], thread_p[m], thread_q[m], thread_k}) = convert_op(
-              alpha * ElementCompute(accum[m][n]) + bias);
-          }
-          else {
-            ElementCompute c_ref = ElementCompute();
-            if (beta != ElementCompute()) {
-              c_ref = ElementCompute(tensor_y_in.at({thread_n[m], thread_p[m], thread_q[m], thread_k}));
-            }
 
-            tensor_y_out.at({thread_n[m], thread_p[m], thread_q[m], thread_k}) = convert_op(
-              alpha * ElementCompute(accum[m][n]) + beta * c_ref);
-          }
+          tensor_y_out.at({thread_n[m], thread_p[m], thread_q[m], thread_k}) = convert_op(
+            alpha * ElementCompute(accum[m][n]) + beta * c_ref);
         }
       } 
     }
@@ -1009,9 +1000,7 @@ Status Conv2dFprop(
   TensorRef<ElementC, LayoutC> tensor_y_out,
   ElementCompute alpha,
   ElementCompute beta,
-  cudaStream_t stream = nullptr,
-  TensorRef<ElementCompute, layout::RowMajor> tensor_scale = TensorRef<ElementCompute, layout::RowMajor>(),
-  TensorRef<ElementCompute, layout::RowMajor> tensor_bias = TensorRef<ElementCompute, layout::RowMajor>() ) {
+  cudaStream_t stream = nullptr) {
 
   //
   // Blocking factors improve performance of reference implementation
@@ -1050,9 +1039,7 @@ Status Conv2dFprop(
     tensor_y_in,
     tensor_y_out,
     alpha,
-    beta,
-    tensor_scale,
-    tensor_bias
+    beta
   );
 
   cudaError_t result = cudaPeekAtLastError();
@@ -1442,9 +1429,7 @@ Status Conv2d(
   TensorRef<ElementC, LayoutC> tensor_D,
   ElementCompute alpha,
   ElementCompute beta,
-  cudaStream_t stream = nullptr,
-  TensorRef<ElementCompute, layout::RowMajor> tensor_scale = TensorRef<ElementCompute, layout::RowMajor>(),
-  TensorRef<ElementCompute, layout::RowMajor> tensor_bias = TensorRef<ElementCompute, layout::RowMajor>() ) {
+  cudaStream_t stream = nullptr) {
   
   switch (convolutional_operator) {
   case conv::Operator::kFprop:
@@ -1455,7 +1440,7 @@ Status Conv2d(
       ElementCompute,
       ElementAccumulator,
       ConvertOp, InnerProductOp
-    >(problem_size, tensor_A, tensor_B, tensor_C, tensor_D, alpha, beta, stream, tensor_scale, tensor_bias);
+    >(problem_size, tensor_A, tensor_B, tensor_C, tensor_D, alpha, beta, stream);
     break;
 
   case conv::Operator::kDgrad:

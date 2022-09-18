@@ -75,22 +75,13 @@ public:
 		std::cout << "Trainer: Initializing " << n_params << " params and resetting training." << std::endl;
 #endif
 
-		m_params_buffer.resize(sizeof(PARAMS_T) * n_params * 3 + sizeof(float) * n_params * 1);
-		m_params_buffer.memset(0);
-
-		m_params_full_precision = (float*)(m_params_buffer.data());
-		m_params                = (PARAMS_T*)(m_params_buffer.data() + sizeof(float) * n_params);
-		m_params_backward       = (PARAMS_T*)(m_params_buffer.data() + sizeof(float) * n_params + sizeof(PARAMS_T) * n_params);
-		m_param_gradients       = (PARAMS_T*)(m_params_buffer.data() + sizeof(float) * n_params + sizeof(PARAMS_T) * n_params * 2);
-
 		// Allocate auxiliary optimizer buffers
 		m_optimizer->allocate(m_model);
 
-		// Use the optimizer's custom params for inference, if they exist.
-		m_params_inference = m_optimizer->custom_weights();
-		if (m_params_inference == nullptr) {
-			m_params_inference = m_params;
-		}
+		m_params_buffer.resize(sizeof(PARAMS_T) * n_params * 3 + sizeof(float) * n_params * 1);
+		m_params_buffer.memset(0);
+
+		reset_param_pointers();
 
 		m_model->initialize_params(
 			m_rng,
@@ -155,8 +146,8 @@ public:
 		return forward;
 	}
 
-	void forward(const float loss_scale, const GPUMatrixDynamic<T>& input, const GPUMatrix<float>& target, const GPUMatrix<float>* data_pdf = nullptr) {
-		forward(nullptr, loss_scale, input, target, data_pdf);
+	std::unique_ptr<ForwardContext> forward(const float loss_scale, const GPUMatrixDynamic<T>& input, const GPUMatrix<float>& target, const GPUMatrix<float>* data_pdf = nullptr) {
+		return forward(nullptr, loss_scale, input, target, data_pdf);
 	}
 
 	void backward(cudaStream_t stream, const ForwardContext& ctx, const GPUMatrixDynamic<T>& input) {
@@ -225,15 +216,27 @@ public:
 		};
 	}
 
-	float* params() {
+	float* params_full_precision() const {
 		return m_params_full_precision;
 	}
 
-	void set_params_full_precision(const float* params_cpu, size_t n_params) {
+	PARAMS_T* params() const {
+		return m_params;
+	}
+
+	PARAMS_T* params_inference() const {
+		return m_params_inference;
+	}
+
+	PARAMS_T* param_gradients() const {
+		return m_param_gradients;
+	}
+
+	void set_params_full_precision(const float* params, size_t n_params, bool device_ptr = false) {
 		if (n_params != m_model->n_params()) {
 			throw std::runtime_error{"Can't set params because CPU buffer has the wrong size."};
 		}
-		CUDA_CHECK_THROW(cudaMemcpy(m_params_full_precision, params_cpu, sizeof(float)*n_params, cudaMemcpyHostToDevice));
+		CUDA_CHECK_THROW(cudaMemcpy(m_params_full_precision, params, sizeof(float)*n_params, device_ptr ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice));
 
 		parallel_for_gpu(n_params, [params_fp=m_params_full_precision, params_inference=m_params_inference] __device__ (size_t i) {
 			params_inference[i] = (PARAMS_T)params_fp[i];
@@ -243,11 +246,11 @@ public:
 		CUDA_CHECK_THROW(cudaDeviceSynchronize());
 	}
 
-	void set_params(const PARAMS_T* params_cpu, size_t n_params) {
+	void set_params(const PARAMS_T* params, size_t n_params, bool device_ptr = false) {
 		if (n_params != m_model->n_params()) {
 			throw std::runtime_error{"Can't set params because CPU buffer has the wrong size."};
 		}
-		CUDA_CHECK_THROW(cudaMemcpy(m_params_inference, params_cpu, sizeof(PARAMS_T)*n_params, cudaMemcpyHostToDevice));
+		CUDA_CHECK_THROW(cudaMemcpy(m_params_inference, params, sizeof(PARAMS_T)*n_params, device_ptr ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice));
 		CUDA_CHECK_THROW(cudaMemcpy(m_params, m_params_inference, sizeof(PARAMS_T)*n_params, cudaMemcpyDeviceToDevice));
 
 		parallel_for_gpu(n_params, [params_fp=m_params_full_precision, params_inference=m_params_inference] __device__ (size_t i) {
@@ -276,14 +279,41 @@ public:
 	}
 
 	void deserialize(const json& data) {
-		json::binary_t params_binary = data["params_binary"];
-		set_params((PARAMS_T*)params_binary.data(), params_binary.size()/sizeof(PARAMS_T));
+		GPUMemory<PARAMS_T> params = data["params_binary"];
+		set_params(params.data(), params.size(), true);
 
 		if (data.contains("optimizer")) {
 			m_optimizer->deserialize(data["optimizer"]);
 		}
 
+		reset_param_pointers();
 		CUDA_CHECK_THROW(cudaDeviceSynchronize());
+	}
+
+	void set_param_gradients_pointer(PARAMS_T* gradients) {
+		reset_param_pointers();
+		m_model->set_params(m_params, m_params_inference, m_params_backward, gradients);
+	}
+
+	void reset_param_pointers() {
+		size_t n_params = m_model->n_params();
+
+		m_params_full_precision = (float*)(m_params_buffer.data());
+		m_params                = (PARAMS_T*)(m_params_buffer.data() + sizeof(float) * n_params);
+		m_params_backward       = (PARAMS_T*)(m_params_buffer.data() + sizeof(float) * n_params + sizeof(PARAMS_T) * n_params);
+		m_param_gradients       = (PARAMS_T*)(m_params_buffer.data() + sizeof(float) * n_params + sizeof(PARAMS_T) * n_params * 2);
+
+		// Use the optimizer's custom params for inference, if they exist.
+		m_params_inference = m_optimizer ? m_optimizer->custom_weights() : nullptr;
+		if (m_params_inference == nullptr) {
+			m_params_inference = m_params;
+		}
+
+		m_model->set_params(m_params, m_params_inference, m_params_backward, m_param_gradients);
+	}
+
+	size_t n_params() const {
+		return m_model->n_params();
 	}
 
 private:

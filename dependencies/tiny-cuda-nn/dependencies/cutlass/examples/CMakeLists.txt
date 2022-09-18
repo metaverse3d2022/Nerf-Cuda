@@ -1,24 +1,32 @@
-# Copyright (c) 2017-2021, NVIDIA CORPORATION.  All rights reserved.
+
+# Copyright (c) 2017 - 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: BSD-3-Clause
 #
-# Redistribution and use in source and binary forms, with or without modification, are permitted
-# provided that the following conditions are met:
-#     * Redistributions of source code must retain the above copyright notice, this list of
-#       conditions and the following disclaimer.
-#     * Redistributions in binary form must reproduce the above copyright notice, this list of
-#       conditions and the following disclaimer in the documentation and/or other materials
-#       provided with the distribution.
-#     * Neither the name of the NVIDIA CORPORATION nor the names of its contributors may be used
-#       to endorse or promote products derived from this software without specific prior written
-#       permission.
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
 #
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
-# IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
-# FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE
-# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
-# BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
-# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
-# STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# 1. Redistributions of source code must retain the above copyright notice, this
+# list of conditions and the following disclaimer.
+#
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+# this list of conditions and the following disclaimer in the documentation
+# and/or other materials provided with the distribution.
+#
+# 3. Neither the name of the copyright holder nor the names of its
+# contributors may be used to endorse or promote products derived from
+# this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 
 set(CUTLASS_EXAMPLES_COMMON_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/common)
 
@@ -45,6 +53,7 @@ function(cutlass_example_add_executable NAME)
     PRIVATE
     CUTLASS
     cutlass_tools_util_includes
+    $<$<BOOL:${CUTLASS_ENABLE_CUBLAS}>:nvidia::cublas>
     )
 
   target_include_directories(
@@ -83,7 +92,7 @@ foreach(EXAMPLE
   10_planar_complex
   11_planar_complex_array
   12_gemm_bias_relu
-  13_two_tensor_op_fusion  
+  13_two_tensor_op_fusion
   14_ampere_tf32_tensorop_gemm
   15_ampere_sparse_tensorop_gemm
   16_ampere_tensorop_conv2dfprop
@@ -100,6 +109,13 @@ foreach(EXAMPLE
   27_ampere_3xtf32_fast_accurate_tensorop_gemm
   28_ampere_3xtf32_fast_accurate_tensorop_fprop
   29_ampere_3xtf32_fast_accurate_tensorop_complex_gemm
+  30_wgrad_split_k
+  31_basic_syrk
+  32_basic_trmm
+  33_ampere_3xtf32_tensorop_symm
+  34_transposed_conv2d
+  35_gemm_softmax
+  36_gather_scatter_fusion
   )
 
   add_subdirectory(${EXAMPLE})

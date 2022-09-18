@@ -1,24 +1,30 @@
 /***************************************************************************************************
- * Copyright (c) 2017-2021, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2017 - 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
- * Redistribution and use in source and binary forms, with or without modification, are permitted
- * provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright notice, this list of
- *       conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright notice, this list of
- *       conditions and the following disclaimer in the documentation and/or other materials
- *       provided with the distribution.
- *     * Neither the name of the NVIDIA CORPORATION nor the names of its contributors may be used
- *       to endorse or promote products derived from this software without specific prior written
- *       permission.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
- * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ * list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ * this list of conditions and the following disclaimer in the documentation
+ * and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its
+ * contributors may be used to endorse or promote products derived from
+ * this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  **************************************************************************************************/
@@ -615,8 +621,22 @@ Status Handle::gemm_universal(
 
   char host_workspace[kHostWorkspaceSize];
 
+  GemmUniversalArguments arguments{
+    ptr_A,
+    ptr_B,
+    ptr_C,
+    ptr_D,
+    alpha,
+    beta,
+    scalar_pointer_mode_,
+    batch_stride_A,
+    batch_stride_B,
+    batch_stride_C,
+    batch_stride_D
+  };
+
   // Query device workspace size
-  uint64_t device_workspace_size_needed = operation->get_device_workspace_size(&configuration);
+  uint64_t device_workspace_size_needed = operation->get_device_workspace_size(&configuration, &arguments);
 
   if (uint64_t(workspace_size_) < device_workspace_size_needed) {
     return cutlass::Status::kErrorNotSupported;
@@ -634,19 +654,6 @@ Status Handle::gemm_universal(
   }
 
   // Run the operator
-  GemmUniversalArguments arguments{
-    ptr_A,
-    ptr_B,
-    ptr_C,
-    ptr_D,
-    alpha,
-    beta,
-    scalar_pointer_mode_,
-    batch_stride_A,
-    batch_stride_B,
-    batch_stride_C,
-    batch_stride_D
-  };
 
   return operation->run(&arguments, host_workspace, workspace_, stream_);
 }
@@ -1098,6 +1105,59 @@ Operation const* find_conv_operation_for_parallel_reduction(Operation const *ope
 
   return nullptr;
 }
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+/// Finds gemm operation instances with Gemm::ElementC = Reduction::ElementWorkspace
+Operation const* find_gemm_operation_for_parallel_reduction(Operation const *operation) {
+
+  GemmDescription const &gemm_desc = 
+    static_cast<GemmDescription const &>(operation->description());
+
+  // if the curren gemm operation accumulator and output data type match return operation
+  if(gemm_desc.tile_description.math_instruction.element_accumulator == gemm_desc.C.element) {
+    return operation;
+  }
+
+  // find gemm operation to match gemm output and reduction workspace data type
+  GemmFunctionalKey key(
+    library::Provider::kCUTLASS,
+    gemm_desc.gemm_kind,
+    gemm_desc.tile_description.math_instruction.element_accumulator,
+    gemm_desc.element_epilogue,
+    gemm_desc.A.element,
+    gemm_desc.A.layout,
+    gemm_desc.transform_A,
+    gemm_desc.B.element,
+    gemm_desc.B.layout,
+    gemm_desc.transform_B,
+    gemm_desc.tile_description.math_instruction.element_accumulator);
+
+  // gemm operation table
+  auto gemm_operations = Singleton::get().operation_table.gemm_operations;
+
+  // find ConvFunctionalKey in gemm operation table
+  auto operators_it = gemm_operations.find(key);
+
+  if (operators_it == gemm_operations.end()) {
+    return nullptr;
+  }
+
+  if (operators_it->second.empty()) {
+    return nullptr;
+  }
+
+  // A and B uses the same alignment in the generator.py
+  int alignment = gemm_desc.A.alignment;
+
+  // gemm operation for same compute capability and iterator algorithm
+  GemmPreferenceKey preference_key(
+    gemm_desc.tile_description.minimum_compute_capability, 
+    alignment);
+
+  return find_gemm_operation(operators_it, preference_key);
+}
+
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 } // namespace library

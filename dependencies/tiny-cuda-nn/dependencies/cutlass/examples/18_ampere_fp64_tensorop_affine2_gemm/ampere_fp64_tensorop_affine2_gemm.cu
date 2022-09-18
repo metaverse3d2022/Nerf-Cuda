@@ -1,24 +1,30 @@
 /***************************************************************************************************
- * Copyright (c) 2017-2021, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2017 - 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
- * Redistribution and use in source and binary forms, with or without modification, are permitted
- * provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright notice, this list of
- *       conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright notice, this list of
- *       conditions and the following disclaimer in the documentation and/or other materials
- *       provided with the distribution.
- *     * Neither the name of the NVIDIA CORPORATION nor the names of its contributors may be used
- *       to endorse or promote products derived from this software without specific prior written
- *       permission.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
- * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ * list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ * this list of conditions and the following disclaimer in the documentation
+ * and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its
+ * contributors may be used to endorse or promote products derived from
+ * this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  **************************************************************************************************/
@@ -46,8 +52,7 @@ This example uses Ampere fp64 tensore core Affine2 GEMM as an example.  SIMT
 #include <sstream>
 
 #include "cutlass/cutlass.h"
-#include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "cutlass/gemm/kernel/default_gemm_with_k_reduction.h"
+#include "cutlass/gemm/device/gemm_universal.h"
 #include "cutlass/reduction/device/reduce_split_k.h"
 #include "cutlass/reduction/kernel/reduce_split_k.h"
 #include "cutlass/reduction/thread/reduction_operators.h"
@@ -94,7 +99,7 @@ using SmArch = cutlass::arch::Sm80;
 using ThreadblockShape = cutlass::gemm::GemmShape<128, 128, 16>;  // Threadblock tile shape
 
 // This code section describes tile size a warp will compute
-using WarpShape = cutlass::gemm::GemmShape<64, 32, 16>;         // Warp tile shape
+using WarpShape = cutlass::gemm::GemmShape<32, 64, 16>;         // Warp tile shape
 
 // This code section describes the size of MMA op
 using InstructionShape = cutlass::gemm::GemmShape<8, 8, 4>;    // TensorCore instruction shape
@@ -111,11 +116,12 @@ using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
     1,                                                    // The number of elements per memory
                                                           // access has.  It has to be 1 for
                                                           // affine2. 
+    ElementAccumulator,
     ElementComputeEpilogue>;
 
-using GemmKernel = typename cutlass::gemm::kernel::DefaultGemmUniversal<
-  ElementInputA, LayoutInputA, cutlass::ComplexTransform::kNone, 1, // AlignmentA has to be 1
-  ElementInputB, LayoutInputB, cutlass::ComplexTransform::kNone, 1, // AlignmentB has to be 1
+using Gemm = typename cutlass::gemm::device::GemmUniversal<
+  ElementInputA, LayoutInputA,
+  ElementInputB, LayoutInputB,
   ElementOutput, LayoutOutput,
   ElementAccumulator,
   MMAOp,
@@ -126,10 +132,10 @@ using GemmKernel = typename cutlass::gemm::kernel::DefaultGemmUniversal<
   EpilogueOp,
   SwizzleThreadBlock,
   NumStages,
+  1,
+  1,
   cutlass::arch::OpMultiplyAdd
->::GemmKernel;
-
-using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+>;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -226,7 +232,7 @@ int run() {
     tensor_b.device_ref().data(),              // <- reference to matrix B on device
     tensor_c.device_ref().data(),              // <- reference to matrix C on device
     tensor_d.device_ref().data(),              // <- reference to matrix D on device
-    tensor_a.layout().capacity(problem_size.mn()),
+    tensor_a.layout().capacity(problem_size.mk()),
     tensor_b.layout().capacity(problem_size.kn()),
     tensor_c.layout().capacity(problem_size.mn()),
     tensor_d.layout().capacity(problem_size.mn()),
@@ -302,7 +308,7 @@ int run() {
 
   CUTLASS_CHECK(status);
 
-  return 0;
+  return (pass ? 0 : -1);
 }
 
 int main(int argc, char const **args) {

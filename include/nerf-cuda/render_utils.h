@@ -29,13 +29,14 @@ NGP_NAMESPACE_BEGIN
 
 // Ray Generation
 __global__ void set_rays_d(MatrixView<float> rays_d, struct Camera cam,
-                           Eigen::Matrix<float, 3, 3> pose, int W, int N) {
+                           Eigen::Matrix<float, 3, 3> pose, int W, int N, int gpuid=0) {
   const uint32_t indexWithinTheGrid = threadIdx.x + blockIdx.x * blockDim.x;
   int gridStride = gridDim.x * blockDim.x;
   // use the grid-stride-loops
   for (int tid = indexWithinTheGrid; tid < N; tid += gridStride) {
-    float i = (tid % W) + 0.5;
-    float j = (tid / W) + 0.5;
+    int newtid = NGPU*tid + gpuid;
+    float i = (newtid % W) + 0.5;
+    float j = (newtid / W) + 0.5;
 
     float zs = 1;
     float xs = (i - cam.cx) / cam.fl_x * zs;

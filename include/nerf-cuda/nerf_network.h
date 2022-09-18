@@ -451,12 +451,12 @@ class NerfNetwork : public tcnn::Network<float, T> {
 
     // test density network
     tcnn::GPUMatrixDynamic<T> density_network_input{
-        m_pos_encoding->padded_output_width(), batch_size, nullptr,
+        m_pos_encoding->padded_output_width(), batch_size,// nullptr,
         m_pos_encoding->preferred_output_layout()};
     density_network_input.initialize_constant(0.1);
 
     tcnn::GPUMatrixDynamic<T> density_network_output{
-        m_density_network->padded_output_width(), batch_size, nullptr,
+        m_density_network->padded_output_width(), batch_size,// nullptr,
         m_pos_encoding->preferred_output_layout()
         };
 

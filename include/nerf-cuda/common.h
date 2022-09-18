@@ -80,4 +80,7 @@ struct Image {
 		depth = in_depth;
 	}
 };
+
+#define NGPU 2
+
 NGP_NAMESPACE_END

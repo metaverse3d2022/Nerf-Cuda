@@ -33,7 +33,7 @@
 
 #include <tiny-cuda-nn/networks/cutlass_mlp.h>
 
-#if TCNN_MIN_GPU_ARCH >= 70
+#if TCNN_MIN_GPU_ARCH > 70
 #include <tiny-cuda-nn/networks/fully_fused_mlp.h>
 #endif
 
@@ -56,7 +56,7 @@ Activation string_to_activation(const std::string& activation_name) {
 		return Activation::Softplus;
 	}
 
-	throw std::runtime_error{std::string{"Invalid activation name: "} + activation_name};
+	throw std::runtime_error{fmt::format("Invalid activation name: {}", activation_name)};
 }
 
 std::string to_string(Activation activation) {
@@ -68,7 +68,7 @@ std::string to_string(Activation activation) {
 		case Activation::Sine: return "Sine";
 		case Activation::Squareplus: return "Squareplus";
 		case Activation::Softplus: return "Softplus";
-		default: throw std::runtime_error{std::string{"Invalid activation"}};
+		default: throw std::runtime_error{"Invalid activation."};
 	}
 }
 
@@ -123,7 +123,7 @@ Network<T>* create_network(const json& network) {
 		if (!std::is_same<network_precision_t, __half>::value) {
 			throw std::runtime_error{"FullyFusedMLP can only be used if the network precision is set to __half."};
 		} else {
-#if TCNN_MIN_GPU_ARCH >= 70
+#if TCNN_MIN_GPU_ARCH > 70
 #  define TCNN_FULLY_FUSED_PARAMS \
 	network["n_input_dims"], \
 	network["n_output_dims"], \
@@ -138,12 +138,12 @@ Network<T>* create_network(const json& network) {
 				case 32:  return new FullyFusedMLP<T,  32>{TCNN_FULLY_FUSED_PARAMS};
 				case 64:  return new FullyFusedMLP<T,  64>{TCNN_FULLY_FUSED_PARAMS};
 				case 128: return new FullyFusedMLP<T, 128>{TCNN_FULLY_FUSED_PARAMS};
-				default: throw std::runtime_error{std::string{"FullyFusedMLP only supports 16, 32, 64, and 128 neurons, but got "} + std::to_string(n_neurons) + ". Use CutlassMLP instead if this is a requirement."};
+				default: throw std::runtime_error{fmt::format("FullyFusedMLP only supports 16, 32, 64, and 128 neurons, but got {}. Use CutlassMLP instead if this is a requirement.", n_neurons)};
 			}
 #  undef TCNN_FULLY_FUSED_PARAMS
-#else //TCNN_MIN_GPU_ARCH >= 70
+#else //TCNN_MIN_GPU_ARCH > 70
 			throw std::runtime_error{"FullyFusedMLP was not compiled due to insufficient GPU arch of <70."};
-#endif //TCNN_MIN_GPU_ARCH >= 70
+#endif //TCNN_MIN_GPU_ARCH > 70
 		}
 	} else if (equals_case_insensitive(network_type, "CutlassMLP")) {
 		return new CutlassMLP<T>{
@@ -156,7 +156,7 @@ Network<T>* create_network(const json& network) {
 		};
 	}
 
-	throw std::runtime_error{std::string{"Invalid network type: "} + network_type};
+	throw std::runtime_error{fmt::format("Invalid network type: {}", network_type)};
 }
 
 template Network<network_precision_t>* create_network(const json& network);

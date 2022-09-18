@@ -35,7 +35,10 @@
 #define TCNN_NAMESPACE_BEGIN namespace tcnn {
 #define TCNN_NAMESPACE_END }
 
+
 #include <tiny-cuda-nn/cpp_api.h>
+
+#include <fmt/core.h>
 
 #include <array>
 #include <iostream>
@@ -87,6 +90,8 @@ enum class Activation {
 //////////////////
 
 int cuda_device();
+void set_cuda_device(int device);
+int cuda_device_count();
 
 bool cuda_supports_virtual_memory(int device);
 inline bool cuda_supports_virtual_memory() {

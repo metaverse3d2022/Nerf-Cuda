@@ -62,13 +62,18 @@ class GPUMemory {
 private:
 	T* m_data = nullptr;
 	size_t m_size = 0; // Number of elements
+	bool m_managed = false;
 
 public:
 	GPUMemory() {}
+	GPUMemory(size_t size, bool managed = false) : m_managed{managed} {
+		resize(size);
+	}
 
 	GPUMemory<T>& operator=(GPUMemory<T>&& other) {
 		std::swap(m_data, other.m_data);
 		std::swap(m_size, other.m_size);
+		std::swap(m_managed, other.m_managed);
 		return *this;
 	}
 
@@ -76,7 +81,11 @@ public:
 		*this = std::move(other);
 	}
 
+	// Don't permit copy assignment to prevent performance accidents.
+	// Copy is permitted through an explicit copy constructor.
+	GPUMemory<T>& operator=(const GPUMemory<T>& other) = delete;
 	explicit GPUMemory(const GPUMemory<T>& other) {
+		m_managed = other.managed();
 		copy_from_device(other);
 	}
 
@@ -108,14 +117,18 @@ public:
 		std::cout << "GPUMemory: Allocating " << bytes_to_string(n_bytes) << "." << std::endl;
 #endif
 
-		uint8_t *rawptr = nullptr;
-		CUDA_CHECK_THROW(cudaMalloc(&rawptr, n_bytes+DEBUG_GUARD_SIZE*2));
+		uint8_t* rawptr = nullptr;
+		if (m_managed) {
+			CUDA_CHECK_THROW(cudaMallocManaged(&rawptr, n_bytes+DEBUG_GUARD_SIZE*2));
+		} else {
+			CUDA_CHECK_THROW(cudaMalloc(&rawptr, n_bytes+DEBUG_GUARD_SIZE*2));
+		}
 #if DEBUG_GUARD_SIZE > 0
-		CUDA_CHECK_THROW(cudaMemset(rawptr , 0xff, DEBUG_GUARD_SIZE));
-		CUDA_CHECK_THROW(cudaMemset(rawptr+n_bytes+DEBUG_GUARD_SIZE , 0xfe, DEBUG_GUARD_SIZE));
+		CUDA_CHECK_THROW(cudaMemset(rawptr, 0xff, DEBUG_GUARD_SIZE));
+		CUDA_CHECK_THROW(cudaMemset(rawptr + n_bytes + DEBUG_GUARD_SIZE, 0xfe, DEBUG_GUARD_SIZE));
 #endif
-		if (rawptr) rawptr+=DEBUG_GUARD_SIZE;
-		m_data=(T*)(rawptr);
+		if (rawptr) rawptr += DEBUG_GUARD_SIZE;
+		m_data = (T*)(rawptr);
 		total_n_bytes_allocated() += n_bytes;
 	}
 
@@ -125,17 +138,12 @@ public:
 		}
 
 		uint8_t *rawptr = (uint8_t*)m_data;
-		if (rawptr) rawptr-=DEBUG_GUARD_SIZE;
+		if (rawptr) rawptr -= DEBUG_GUARD_SIZE;
 		CUDA_CHECK_THROW(cudaFree(rawptr));
 
 		total_n_bytes_allocated() -= get_bytes();
 
 		m_data = nullptr;
-	}
-
-	/// Allocates memory for size items of type T
-	GPUMemory(const size_t size) {
-		resize(size);
 	}
 
 	/// Frees memory again
@@ -149,7 +157,7 @@ public:
 		} catch (std::runtime_error error) {
 			// Don't need to report on memory-free problems when the driver is shutting down.
 			if (std::string{error.what()}.find("driver shutting down") == std::string::npos) {
-				fprintf(stderr, "Could not free memory: %s\n", error.what());
+				std::cerr << "Could not free memory: " << error.what() << std::endl;
 			}
 		}
 #endif
@@ -165,7 +173,7 @@ public:
 				try {
 					free_memory();
 				} catch (std::runtime_error error) {
-					throw std::runtime_error(std::string("Could not free memory: ") + error.what());
+					throw std::runtime_error{fmt::format("Could not free memory: {}", error.what())};
 				}
 			}
 
@@ -173,7 +181,7 @@ public:
 				try {
 					allocate_memory(size * sizeof(T));
 				} catch (std::runtime_error error) {
-					throw std::runtime_error(std::string("Could not allocate memory: ") + error.what());
+					throw std::runtime_error{fmt::format("Could not allocate memory: {}", error.what())};
 				}
 			}
 
@@ -195,14 +203,10 @@ public:
 	/// Sets the memory of the first num_elements to value
 	void memset(const int value, const size_t num_elements, const size_t offset = 0) {
 		if (num_elements + offset > m_size) {
-			throw std::runtime_error("Could not set memory: Number of elements larger than allocated memory");
+			throw std::runtime_error{fmt::format("Could not set memory: Number of elements {}+{} larger than allocated memory {}.", num_elements, offset, m_size)};
 		}
 
-		try {
-			CUDA_CHECK_THROW(cudaMemset(m_data + offset, value, num_elements * sizeof(T)));
-		} catch (std::runtime_error error) {
-			throw std::runtime_error(std::string("Could not set memory: ") + error.what());
-		}
+		CUDA_CHECK_THROW(cudaMemset(m_data + offset, value, num_elements * sizeof(T)));
 	}
 
 	/// Sets the memory of the all elements to value
@@ -216,17 +220,13 @@ public:
 	 */
 	/// Copy data of num_elements from the raw pointer on the host
 	void copy_from_host(const T* host_data, const size_t num_elements) {
-		try {
-			CUDA_CHECK_THROW(cudaMemcpy(data(), host_data, num_elements * sizeof(T), cudaMemcpyHostToDevice));
-		} catch (std::runtime_error error) {
-			throw std::runtime_error(std::string("Could not copy from host: ") + error.what());
-		}
+		CUDA_CHECK_THROW(cudaMemcpy(data(), host_data, num_elements * sizeof(T), cudaMemcpyHostToDevice));
 	}
 
 	/// Copy num_elements from the host vector
 	void copy_from_host(const std::vector<T>& data, const size_t num_elements) {
 		if (data.size() < num_elements) {
-			throw std::runtime_error(std::string("Trying to copy ") + std::to_string(num_elements) + std::string(" elements, but vector size is only ") + std::to_string(data.size()));
+			throw std::runtime_error{fmt::format("Trying to copy {} elements, but vector size is only {}.", num_elements, data.size())};
 		}
 		copy_from_host(data.data(), num_elements);
 	}
@@ -271,7 +271,7 @@ public:
 	/// Copies the entire host vector to the device. Fails if there is not enough space available.
 	void copy_from_host(const std::vector<T>& data) {
 		if (data.size() < m_size) {
-			throw std::runtime_error(std::string("Trying to copy ") + std::to_string(m_size) + std::string(" elements, but vector size is only ") + std::to_string(data.size()));
+			throw std::runtime_error{fmt::format("Trying to copy {} elements, but vector size is only {}.", m_size, data.size())};
 		}
 		copy_from_host(data.data(), m_size);
 	}
@@ -279,20 +279,18 @@ public:
 	/// Copies num_elements of data from the raw host pointer to the device. Fails if there is not enough space available.
 	void copy_to_host(T* host_data, const size_t num_elements) const {
 		if (num_elements > m_size) {
-			throw std::runtime_error(std::string("Trying to copy ") + std::to_string(num_elements) + std::string(" elements, but vector size is only ") + std::to_string(m_size));
+			throw std::runtime_error{fmt::format("Trying to copy {} elements, but memory size is only {}.", num_elements, m_size)};
 		}
-		try {
-			CUDA_CHECK_THROW(cudaMemcpy(host_data, data(), num_elements * sizeof(T), cudaMemcpyDeviceToHost));
-		} catch (std::runtime_error error) {
-			throw std::runtime_error(std::string("Could not copy to host: ") + error.what());
-		}
+
+		CUDA_CHECK_THROW(cudaMemcpy(host_data, data(), num_elements * sizeof(T), cudaMemcpyDeviceToHost));
 	}
 
 	/// Copies num_elements from the device to a vector on the host
 	void copy_to_host(std::vector<T>& data, const size_t num_elements) const {
 		if (data.size() < num_elements) {
-			throw std::runtime_error(std::string("Trying to copy ") + std::to_string(num_elements) + std::string(" elements, but vector size is only ") + std::to_string(data.size()));
+			throw std::runtime_error{fmt::format("Trying to copy {} elements, but vector size is only {}.", num_elements, data.size())};
 		}
+
 		copy_to_host(data.data(), num_elements);
 	}
 
@@ -304,13 +302,14 @@ public:
 	/// Copies all elements from the device to a vector on the host
 	void copy_to_host(std::vector<T>& data) const {
 		if (data.size() < m_size) {
-			throw std::runtime_error(std::string("Trying to copy ") + std::to_string(m_size) + std::string(" elements, but vector size is only ") + std::to_string(data.size()));
+			throw std::runtime_error{fmt::format("Trying to copy {} elements, but vector size is only {}", m_size, data.size())};
 		}
+
 		copy_to_host(data.data(), m_size);
 	}
 
 	/// Copies size elements from another device array to this one, automatically resizing it
-	void copy_from_device(const GPUMemory<T> &other, const size_t size) {
+	void copy_from_device(const GPUMemory<T>& other, const size_t size) {
 		if (size == 0) {
 			return;
 		}
@@ -319,11 +318,7 @@ public:
 			resize(size);
 		}
 
-		try {
-			CUDA_CHECK_THROW(cudaMemcpy(m_data, other.m_data, size * sizeof(T), cudaMemcpyDeviceToDevice));
-		} catch (std::runtime_error error) {
-			throw std::runtime_error(std::string("Could not copy from device: ") + error.what());
-		}
+		CUDA_CHECK_THROW(cudaMemcpy(m_data, other.m_data, size * sizeof(T), cudaMemcpyDeviceToDevice));
 	}
 
 	/// Copies data from another device array to this one, automatically resizing it
@@ -345,6 +340,22 @@ public:
 	T* data() const {
 		check_guards();
 		return m_data;
+	}
+
+	bool managed() const {
+		return m_managed;
+	}
+
+	T& at(size_t idx) const {
+		if (!m_managed) {
+			throw std::runtime_error{fmt::format("GPUMemory::at() not permitted if not managed.")};
+		}
+
+		if (idx > m_size) {
+			throw std::runtime_error{fmt::format("GPUMemory our of bounds: idx={} size={}", idx, m_size)};
+		}
+
+		return m_data[idx];
 	}
 
 	TCNN_HOST_DEVICE T& operator[](size_t idx) const {
@@ -417,6 +428,8 @@ struct Interval {
 class GPUMemoryArena {
 public:
 	GPUMemoryArena() {
+		m_device = cuda_device();
+
 		// Align memory at least by a cache line (128 bytes).
 		m_alignment = (size_t)128;
 		m_max_size = next_multiple(cuda_memory_info().total, cuda_memory_granularity());
@@ -431,7 +444,7 @@ public:
 			if (!printed_warning) {
 				printed_warning = true;
 				std::cout
-					<< "GPUMemoryArena: Warning: GPU " << cuda_device() << " does not support virtual memory. "
+					<< "GPUMemoryArena: Warning: GPU " << m_device << " does not support virtual memory. "
 					<< "Falling back to regular allocations, which will be larger and can cause occasional stutter."
 					<< std::endl;
 			}
@@ -448,9 +461,20 @@ public:
 
 	GPUMemoryArena(GPUMemoryArena&& other) = default;
 	GPUMemoryArena(const GPUMemoryArena& other) = delete;
+	GPUMemoryArena& operator=(GPUMemoryArena&& other) = delete;
+	GPUMemoryArena& operator=(const GPUMemoryArena& other) = delete;
 
 	~GPUMemoryArena() {
+		if (in_use()) {
+			std::cerr << "Attempting to free memory arena while it is still in use." << std::endl;
+		}
+
 		try {
+			// Make sure we're clearing the GPU memory arena on the correct device.
+			int previous_device = cuda_device();
+			set_cuda_device(m_device);
+			ScopeGuard revert_device = {[&]() { set_cuda_device(previous_device); }};
+
 			CUDA_CHECK_THROW(cudaDeviceSynchronize());
 
 			if (m_base_address) {
@@ -467,7 +491,7 @@ public:
 		} catch (std::runtime_error error) {
 			// Don't need to report on memory-free problems when the driver is shutting down.
 			if (std::string{error.what()}.find("driver shutting down") == std::string::npos) {
-				fprintf(stderr, "Could not free memory: %s\n", error.what());
+				std::cerr << "Could not free memory arena: " << error.what() << std::endl;
 			}
 		}
 	}
@@ -531,6 +555,10 @@ public:
 			return;
 		}
 
+		if (cuda_device() != m_device) {
+			throw std::runtime_error{fmt::format("Attempted to use a GPUMemoryArena of device {} from the wrong device {}.", m_device, cuda_device())};
+		}
+
 		if (m_fallback_memory) {
 			static const double GROWTH_FACTOR = 1.5;
 
@@ -550,7 +578,7 @@ public:
 		CUmemAllocationProp prop = {};
 		prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
 		prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-		prop.location.id = cuda_device();
+		prop.location.id = m_device;
 
 		m_handles.emplace_back();
 		CU_CHECK_THROW(cuMemCreate(&m_handles.back(), n_bytes_to_allocate, &prop, 0));
@@ -578,10 +606,14 @@ public:
 		return m_free_intervals.back().start;
 	}
 
+	bool in_use() const {
+		return m_free_intervals.size() != 1 || m_free_intervals.front().size() != m_max_size;
+	}
+
 	class Allocation {
 	public:
 		Allocation() = default;
-		Allocation(cudaStream_t stream, size_t offset, GPUMemoryArena* workspace)
+		Allocation(cudaStream_t stream, size_t offset, const std::shared_ptr<GPUMemoryArena>& workspace)
 		: m_stream{stream}, m_data{workspace->data() + offset}, m_offset{offset}, m_workspace{workspace}, m_backing_memory{workspace->backing_memory()}
 		{}
 
@@ -622,7 +654,7 @@ public:
 		cudaStream_t m_stream = nullptr;
 		uint8_t* m_data = nullptr;
 		size_t m_offset = 0;
-		GPUMemoryArena* m_workspace = nullptr;
+		std::shared_ptr<GPUMemoryArena> m_workspace = nullptr;
 
 		// Backing GPUMemory (if backed by a GPUMemory). Ensures that
 		// the backing memory is only freed once all allocations that
@@ -650,6 +682,7 @@ private:
 	std::vector<Interval> m_free_intervals;
 	std::unordered_map<size_t, size_t> m_allocated_intervals;
 
+	int m_device = 0;
 	CUdeviceptr m_base_address = {};
 	size_t m_size = 0;
 
@@ -663,8 +696,13 @@ private:
 	size_t m_max_size;
 };
 
-inline std::unordered_map<cudaStream_t, GPUMemoryArena>& gpu_memory_arenas() {
-	static std::unordered_map<cudaStream_t, GPUMemoryArena> s_gpu_memory_arenas;
+inline std::unordered_map<cudaStream_t, std::shared_ptr<GPUMemoryArena>>& stream_gpu_memory_arenas() {
+	static std::unordered_map<cudaStream_t, std::shared_ptr<GPUMemoryArena>> s_gpu_memory_arenas;
+	return s_gpu_memory_arenas;
+}
+
+inline std::unordered_map<int, std::shared_ptr<GPUMemoryArena>>& global_gpu_memory_arenas() {
+	static std::unordered_map<int, std::shared_ptr<GPUMemoryArena>> s_gpu_memory_arenas;
 	return s_gpu_memory_arenas;
 }
 
@@ -674,11 +712,14 @@ inline GPUMemoryArena::Allocation allocate_workspace(cudaStream_t stream, size_t
 		return {};
 	}
 
-	auto& arena = gpu_memory_arenas()[stream];
-	return GPUMemoryArena::Allocation{stream, arena.allocate(n_bytes), &arena};
+	auto& arena = stream ? stream_gpu_memory_arenas()[stream] : global_gpu_memory_arenas()[cuda_device()];
+	if (!arena) {
+		arena = std::make_shared<GPUMemoryArena>();
+	}
+	return GPUMemoryArena::Allocation{stream, arena->allocate(n_bytes), arena};
 }
 
-static size_t align_to_cacheline(size_t bytes) {
+inline size_t align_to_cacheline(size_t bytes) {
 	return next_multiple(bytes, (size_t)128);
 }
 
@@ -700,11 +741,16 @@ std::tuple<Types*...> allocate_workspace_and_distribute(cudaStream_t stream, GPU
 }
 
 inline void free_gpu_memory_arena(cudaStream_t stream) {
-	gpu_memory_arenas().erase(stream);
+	if (stream) {
+		stream_gpu_memory_arenas().erase(stream);
+	} else {
+		global_gpu_memory_arenas().erase(cuda_device());
+	}
 }
 
 inline void free_all_gpu_memory_arenas() {
-	gpu_memory_arenas().clear();
+	stream_gpu_memory_arenas().clear();
+	global_gpu_memory_arenas().clear();
 }
 
 TCNN_NAMESPACE_END
