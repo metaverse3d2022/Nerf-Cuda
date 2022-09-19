@@ -1,24 +1,30 @@
 /***************************************************************************************************
- * Copyright (c) 2017-2021, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2017 - 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
  *
- * Redistribution and use in source and binary forms, with or without modification, are permitted
- * provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright notice, this list of
- *       conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright notice, this list of
- *       conditions and the following disclaimer in the documentation and/or other materials
- *       provided with the distribution.
- *     * Neither the name of the NVIDIA CORPORATION nor the names of its contributors may be used
- *       to endorse or promote products derived from this software without specific prior written
- *       permission.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
- * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ * list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ * this list of conditions and the following disclaimer in the documentation
+ * and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its
+ * contributors may be used to endorse or promote products derived from
+ * this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  **************************************************************************************************/
@@ -99,6 +105,8 @@ public:
   cutlass::HostTensor<ElementC, LayoutC> tensor_D_computed;
   cutlass::HostTensor<ElementC, LayoutC> tensor_D_reference;
 
+  int tested_problem_count;
+
 public:
 
   TestbedConv2d(
@@ -107,7 +115,7 @@ public:
     cutlass::Distribution::Kind init_C_ = cutlass::Distribution::Uniform,
     uint64_t seed_ = 2080
   ):
-    init_A(init_A_), init_B(init_B_), init_C(init_C_), seed(seed_) {
+    init_A(init_A_), init_B(init_B_), init_C(init_C_), seed(seed_), tested_problem_count(0) {
 
   }
 
@@ -220,7 +228,10 @@ public:
       return true;
     }
 
-#if 0 //display conv2d problem size for debugging
+    // increment tested problem count run by the testbed
+    tested_problem_count++;
+
+#if 0 // display conv2d problem size for debugging
     std::cout << problem_size << std::endl
               << "alpha, beta: (" << alpha << ", " << beta << ")" << std::endl
               << "split_k_mode: " << ((split_k_mode == cutlass::conv::SplitKMode::kSerial) ? "(serial)" : "(parallel)") << std::endl
@@ -276,6 +287,7 @@ public:
     
     EXPECT_TRUE(status == cutlass::Status::kSuccess);
     if (status != cutlass::Status::kSuccess) {
+      std::cerr << "Failed to run." << std::endl;
       return false;
     }
 
@@ -447,33 +459,36 @@ public:
 
     EXPECT_TRUE(passed);
 
+    std::stringstream ss_problem_size_text;
+    ss_problem_size_text         << "nhwc_"
+        << problem_size.N << "x"
+        << problem_size.H << "x"
+        << problem_size.W << "x"
+        << problem_size.C
+        << "_krsc_"
+        << problem_size.K << "x"
+        << problem_size.R << "x"
+        << problem_size.S << "x"
+        << problem_size.C
+        << "_padding_"
+        << problem_size.pad_h << "x"
+        << problem_size.pad_w
+        << "_stride_"
+        << problem_size.stride_h << "x"
+        << problem_size.stride_w
+        << "_dilation_"
+        << problem_size.dilation_h << "x"
+        << problem_size.dilation_w << "_"
+        << (problem_size.mode == cutlass::conv::Mode::kCrossCorrelation ? "xcorr_" : "conv_");
+
     if (!passed) {
       std::stringstream fname;
 
       fname << "error_Conv2d_ImplicitGemm_device_"
         << (split_k_mode == cutlass::conv::SplitKMode::kSerial ? "serial_reduction_" : "parallel_reduction_")
         << (Conv2d::kConvolutionalOperator == cutlass::conv::Operator::kFprop ? "fprop_" :
-            (Conv2d::kConvolutionalOperator == cutlass::conv::Operator::kDgrad ? "dgrad_" : "wgrad_")) 
-        << "nhwc_"
-        << problem_size.N << "x"
-        << problem_size.H << "x"
-        << problem_size.W << "x"
-        << problem_size.C 
-        << "_krsc_"
-        << problem_size.K << "x"
-        << problem_size.R << "x"
-        << problem_size.S << "x"
-        << problem_size.C 
-        << "_padding_" 
-        << problem_size.pad_h << "x"
-        << problem_size.pad_w 
-        << "_stride_"  
-        << problem_size.stride_h << "x"
-        << problem_size.stride_w 
-        << "_dilation_"
-        << problem_size.dilation_h << "x"
-        << problem_size.dilation_w << "_"
-        << (problem_size.mode == cutlass::conv::Mode::kCrossCorrelation ? "xcorr_" : "conv_")
+            (Conv2d::kConvolutionalOperator == cutlass::conv::Operator::kDgrad ? "dgrad_" : "wgrad_"))
+        << ss_problem_size_text.str()
         << Conv2d::ThreadblockShape::kM << "x"  
         << Conv2d::ThreadblockShape::kN << "x"  
         << Conv2d::ThreadblockShape::kK << "_"
@@ -510,6 +525,49 @@ public:
 
 };
 
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template <typename ImplicitGemm>
+bool TestSpecificConv2d(
+  const Conv2dProblemVector & problem_sizes) {
+
+  bool passed = true;
+
+  //
+  // Testbed object
+  //
+
+  TestbedConv2d<ImplicitGemm> testbed;
+
+  // Sweep conv2d problem sizes (split-k-mode=kSerial, split-k-slice=1, alpha=1.0, beta=0.0)
+  for(auto conv_problem : problem_sizes) {
+
+    //
+    // Test
+    //
+
+    // test mode = xcross
+    passed = testbed.run(
+      conv_problem,
+      cutlass::conv::SplitKMode::kSerial);
+
+    if (!passed) {
+      return false;
+    }
+
+    // test mode = convolution
+    passed = testbed.run(
+      conv_problem.reset_mode(cutlass::conv::Mode::kConvolution),
+      cutlass::conv::SplitKMode::kSerial);
+
+    if (!passed) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 // TestAllConv: Runs cutlass::conv::device::ImplicitGemmConvolution operator and compares it with reference
 // TestAllConv runs conv operator on default conv problem sizes from test::conv::device::TestbedConv2dProblemSizes
@@ -537,79 +595,126 @@ bool TestAllConv2d(
   // Vector of conv2d problem sizes to avoid duplicate runs
   Conv2dProblemVector conv_tested_sizes;
 
-  Conv2dProblemVector const *problem_vectors[] = {
-    &conv_test_sizes,                               // run user specified sizes
-    &conv_problems.conv2d_default_sizes,            // run default and cudnn bug sizes
-    //&conv_problems.conv2d_resnet50_sizes,           // run resnet50 sizes
+  // Vectors of Conv2dProblemVector (lenient/easiest to rigorous problem sizes)
+  std::vector<Conv2dProblemVector> problem_vectors = {
+    conv_test_sizes,                               // run user specified sizes
+    conv_problems.conv2d_default_sizes,            // run default and cudnn bug sizes
+    //conv_problems.conv2d_resnet50_sizes,         // run resnet50 sizes
 #if CUTLASS_CONV_UNIT_TEST_RIGOROUS_SIZE_ENABLED 
-    &conv_problems.conv2d_rigorous_sizes,           // run large and rigorous sizes if enabled
+    conv_problems.conv2d_rigorous_sizes,           // run large and rigorous sizes if enabled
 #endif
   };
 
+  // Flatten 2D problem_vectors into a 1D problem_sizes
+  std::vector<cutlass::conv::Conv2dProblemSize> problem_sizes;
+  for (auto problem_vector : problem_vectors) {
+    for(auto conv_problem : problem_vector) {
+      problem_sizes.push_back(conv_problem);
+    }
+  }  
+
+  // If CUTLASS_UNIT_TEST_PROBLEM_COUNT is set reverse the order (rigorous to lenient) 
+  // run the most rigorous problem size first
+  if (CutlassUnitTestProblemCount()) {
+    std::reverse(problem_sizes.begin(), problem_sizes.end());
+  }
+
   // Sweep conv2d problem sizes (split-k-mode=kSerial, split-k-slice=1, alpha=1.0, beta=0.0)
-  for (Conv2dProblemVector const * problem_vector : problem_vectors) {
+  for(auto conv_problem : problem_sizes) {
 
-    //  Run conv testbed on default convolution sizes
-    for(auto conv_problem : *problem_vector) {
+    // Skip blacklist and avoid duplicate problem sizes
+    if (std::find(conv_blacklist_sizes.begin(), conv_blacklist_sizes.end(), conv_problem) != conv_blacklist_sizes.end() ||
+        std::find(conv_tested_sizes.begin(), conv_tested_sizes.end(), conv_problem) != conv_tested_sizes.end()) {
+      continue;
+    }
 
-      // Skip blacklist and avoid duplicate problem sizes
-      if (std::find(conv_blacklist_sizes.begin(), conv_blacklist_sizes.end(), conv_problem) != conv_blacklist_sizes.end() ||
-          std::find(conv_tested_sizes.begin(), conv_tested_sizes.end(), conv_problem) != conv_tested_sizes.end()) {
+    //
+    // Procedurally disable certain cases
+    //
+  
+    // CUTLASS DGRAD's *unity* stride specialization only support stride {1, 1} 
+    if ((ImplicitGemm::kConvolutionalOperator == 
+          cutlass::conv::Operator::kDgrad) && 
+        (ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::kStrideSupport == 
+          cutlass::conv::StrideSupport::kUnity)) {
+      if (!((conv_problem.stride_h == 1) && (conv_problem.stride_w == 1))) {
         continue;
       }
+    }
 
-      //
-      // Procedurally disable certain cases
-      //
+    // Fixed channels algorithm requires channel count to match access size
+    if (ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::kIteratorAlgorithm ==
+        cutlass::conv::IteratorAlgorithm::kFixedChannels) {
+      if (conv_problem.C != ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::AccessType::kElements) {
+        continue;
+      }
+    }
+
+    // Few channels algorithm requires channel count to match access size
+    if (ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::kIteratorAlgorithm ==
+        cutlass::conv::IteratorAlgorithm::kFewChannels) {
+      if (conv_problem.C % ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::AccessType::kElements) {
+        continue;
+      }
+    }
+
+    // CUTLASS DGRAD's *strided* stride specialization supports all stride {stride_h, stride_w} 
+    // Although strided dgrad works for all stride combinations, we are only going 
+    // to run strided dgrad for non-unity strides 
+    if ((ImplicitGemm::kConvolutionalOperator == 
+          cutlass::conv::Operator::kDgrad) && 
+        (ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::kStrideSupport == 
+          cutlass::conv::StrideSupport::kStrided)) {
+       if (((conv_problem.stride_h == 1) && (conv_problem.stride_w == 1))) {
+         continue;
+       }
+    }
+    
+    //
+    // Test
+    //
+    // push back tested problem size to avoid re-running duplicates
+    conv_tested_sizes.push_back(conv_problem);
+
+    // test mode = xcross
+    passed = testbed.run(
+      conv_problem,
+      cutlass::conv::SplitKMode::kSerial);
   
-      // CUTLASS DGRAD's *unity* stride specialization only support stride {1, 1} 
-      if ((ImplicitGemm::kConvolutionalOperator == 
-            cutlass::conv::Operator::kDgrad) && 
-          (ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::kStrideSupport == 
-            cutlass::conv::StrideSupport::kUnity)) {
-        if (!((conv_problem.stride_h == 1) && (conv_problem.stride_w == 1))) {
-          continue;
-        }
-      }
+    if (!passed) {
+      return false;
+    }
 
-      // CUTLASS DGRAD's *strided* stride specialization supports all stride {stride_h, stride_w} 
-      // Although strided dgrad works for all stride combinations, we are only going 
-      // to run strided dgrad for non-unity strides 
-      if ((ImplicitGemm::kConvolutionalOperator == 
-            cutlass::conv::Operator::kDgrad) && 
-          (ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::kStrideSupport == 
-            cutlass::conv::StrideSupport::kStrided)) {
-         if (((conv_problem.stride_h == 1) && (conv_problem.stride_w == 1))) {
-           continue;
-         }
-      }
-      
-      //
-      // Test
-      //
-      // push back tested problem size to avoid re-running duplicates
-      conv_tested_sizes.push_back(conv_problem);
+    // test mode = convolution
+    passed = testbed.run(
+      conv_problem.reset_mode(cutlass::conv::Mode::kConvolution),
+      cutlass::conv::SplitKMode::kSerial);
+  
+    if (!passed) {
+      return false;
+    }
 
-      // test mode = xcross
-      passed = testbed.run(
-        conv_problem,
-        cutlass::conv::SplitKMode::kSerial);
-    
-      if (!passed) {
-        return false;
-      }
-      
-      // test mode = convolution
-      passed = testbed.run(
-        conv_problem.reset_mode(cutlass::conv::Mode::kConvolution),
-        cutlass::conv::SplitKMode::kSerial);
-    
-      if (!passed) {
-        return false;
-      }
+    // If CUTLASS_UNIT_TEST_PROBLEM_COUNT is set reduce the the number of tested problem counts
+    if (CutlassUnitTestProblemCount() && 
+        testbed.tested_problem_count > CutlassUnitTestProblemCount()) {
+      return true;
     }
   }
 
+  // Small-channels convolution can't run here.
+  if (ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::kIteratorAlgorithm ==
+        cutlass::conv::IteratorAlgorithm::kFixedChannels) {
+
+    return true;
+  }
+
+  // Small-channels convolution can't run here.
+  if (ImplicitGemm::ImplicitGemmKernel::Mma::IteratorA::kIteratorAlgorithm ==
+        cutlass::conv::IteratorAlgorithm::kFewChannels) {
+
+    return true;
+  }
+  
   // CUTLASS DGRAD's *strided* specialization does not support split-k mode 
   if ((ImplicitGemm::kConvolutionalOperator == 
           cutlass::conv::Operator::kDgrad) && 
@@ -633,7 +738,6 @@ bool TestAllConv2d(
 
     return passed;
   }
-
   // Sweep split-k-slice using serial and prallel reduction with non-unity alpha and non-zero beta for 
   // a single conv2d problem size. Convolution unit tests take a long time to run so only sweep parameters 
   // which are abolutely neccessary to catch functional bugs. The below code does provide option to sweep 
@@ -677,6 +781,12 @@ bool TestAllConv2d(
           if (!passed) {
             return false;
           }
+
+          // If CUTLASS_UNIT_TEST_PROBLEM_COUNT is set reduce the the number of tested problem counts
+          if (CutlassUnitTestProblemCount() && 
+              testbed.tested_problem_count > CutlassUnitTestProblemCount()) {
+            return true;
+          }
         }
       }
     }
@@ -690,3 +800,5 @@ bool TestAllConv2d(
 } // namespace device
 } // namespace conv
 } // namespace test
+
+/////////////////////////////////////////////////////////////////////////////////////////////////

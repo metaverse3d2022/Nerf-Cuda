@@ -36,6 +36,8 @@
 
 TCNN_NAMESPACE_BEGIN
 
+void free_multi_streams(cudaStream_t parent_stream);
+
 // Synchronization helpers
 struct StreamAndEvent {
 public:
@@ -46,6 +48,8 @@ public:
 
 	~StreamAndEvent() {
 		if (m_stream) {
+			free_multi_streams(m_stream);
+			free_gpu_memory_arena(m_stream);
 			cudaStreamDestroy(m_stream);
 		}
 
@@ -55,10 +59,16 @@ public:
 	}
 
 	// Only allow moving of these guys. No copying.
+	StreamAndEvent& operator=(const StreamAndEvent&) = delete;
 	StreamAndEvent(const StreamAndEvent&) = delete;
-	StreamAndEvent(StreamAndEvent&& other) : m_stream{other.m_stream}, m_event{other.m_event} {
-		other.m_stream = {};
-		other.m_event = {};
+	StreamAndEvent& operator=(StreamAndEvent&& other) {
+		std::swap(m_stream, other.m_stream);
+		std::swap(m_event, other.m_event);
+		return *this;
+	}
+
+	StreamAndEvent(StreamAndEvent&& other) {
+		*this = std::move(other);
 	}
 
 	void wait_for(cudaEvent_t event) {
@@ -75,8 +85,8 @@ public:
 	}
 
 private:
-	cudaStream_t m_stream;
-	cudaEvent_t m_event;
+	cudaStream_t m_stream = {};
+	cudaEvent_t m_event = {};
 };
 
 struct MultiStream {
@@ -88,6 +98,11 @@ public:
 	~MultiStream() {
 		cudaEventDestroy(m_event);
 	}
+
+	MultiStream& operator=(const MultiStream&) = delete;
+	MultiStream(const MultiStream&) = delete;
+	MultiStream& operator=(MultiStream&&) = delete;
+	MultiStream(MultiStream&&) = delete;
 
 	void signal(cudaStream_t outer_stream) {
 		for (size_t i = 0; i < m_n_streams; ++i) {
@@ -115,7 +130,7 @@ public:
 
 	cudaStream_t get(size_t idx) {
 		if (idx >= m_n_streams) {
-			throw std::runtime_error{std::string{"MultiStream: invalid stream index requested: "} + std::to_string(idx) + "/" + std::to_string(m_n_streams)};
+			throw std::runtime_error{fmt::format("MultiStream: invalid stream index requested: {}/{}", idx, m_n_streams)};
 		}
 		return m_streams.at(idx).get();
 	}
@@ -128,13 +143,27 @@ private:
 	cudaEvent_t m_event;
 };
 
-inline std::map<cudaStream_t, std::stack<std::shared_ptr<MultiStream>>>& multi_streams() {
-	static std::map<cudaStream_t, std::stack<std::shared_ptr<MultiStream>>> s_multi_streams;
+inline std::unordered_map<cudaStream_t, std::stack<std::shared_ptr<MultiStream>>>& stream_multi_streams() {
+	static std::unordered_map<cudaStream_t, std::stack<std::shared_ptr<MultiStream>>> s_multi_streams;
 	return s_multi_streams;
 }
 
+inline std::unordered_map<int, std::stack<std::shared_ptr<MultiStream>>>& global_multi_streams() {
+	static std::unordered_map<int, std::stack<std::shared_ptr<MultiStream>>> s_multi_streams;
+	return s_multi_streams;
+}
+
+inline std::stack<std::shared_ptr<MultiStream>>& get_multi_stream_stack(cudaStream_t parent_stream) {
+	return parent_stream ? stream_multi_streams()[parent_stream] : global_multi_streams()[cuda_device()];
+}
+
+inline void free_multi_streams(cudaStream_t parent_stream) {
+	CHECK_THROW(parent_stream);
+	stream_multi_streams().erase(parent_stream);
+}
+
 inline std::shared_ptr<MultiStream> reserve_multi_stream(cudaStream_t parent_stream, size_t n_streams) {
-	auto& stack = multi_streams()[parent_stream];
+	auto& stack = get_multi_stream_stack(parent_stream);
 	if (stack.empty()) {
 		stack.push(std::make_shared<MultiStream>());
 	}
@@ -146,17 +175,18 @@ inline std::shared_ptr<MultiStream> reserve_multi_stream(cudaStream_t parent_str
 }
 
 inline void return_multi_stream(cudaStream_t parent_stream, std::shared_ptr<MultiStream> multi_stream) {
-	if (multi_streams().count(parent_stream) == 0) {
+	if (parent_stream ? (stream_multi_streams().count(parent_stream) == 0) : (global_multi_streams().count(cuda_device()) == 0)) {
 		throw std::runtime_error{"Attempted to return multi stream to the wrong parent stream."};
 	}
 
-	auto& stack = multi_streams()[parent_stream];
+	auto& stack = get_multi_stream_stack(parent_stream);
 	stack.push(multi_stream);
 }
 
 // RAII wrapper around MultiStream
 struct SyncedMultiStream {
 public:
+	SyncedMultiStream() = default;
 	SyncedMultiStream(cudaStream_t stream, size_t n_streams) : m_main_stream{stream}, m_n_streams{n_streams} {
 		if (m_n_streams == 0) {
 			throw std::runtime_error{"SyncedMultiStream: must request at least one stream"};
@@ -176,14 +206,25 @@ public:
 	}
 
 	// Only allow moving of these guys. No copying.
+	SyncedMultiStream& operator=(const SyncedMultiStream& other) = delete;
 	SyncedMultiStream(const SyncedMultiStream&) = delete;
-	SyncedMultiStream(SyncedMultiStream&& other) {
+
+	SyncedMultiStream& operator=(SyncedMultiStream&& other) {
 		std::swap(m_multi_stream, other.m_multi_stream);
 		std::swap(m_main_stream, other.m_main_stream);
 		std::swap(m_n_streams, other.m_n_streams);
+		return *this;
+	}
+
+	SyncedMultiStream(SyncedMultiStream&& other) {
+		*this = std::move(other);
 	}
 
 	cudaStream_t get(size_t idx) {
+		if (m_n_streams == 0) {
+			throw std::runtime_error{"SyncedMultiStream: must have at least one stream"};
+		}
+
 		if (idx == 0) {
 			return m_main_stream;
 		} else {
@@ -198,7 +239,7 @@ public:
 private:
 	std::shared_ptr<MultiStream> m_multi_stream = nullptr;
 	cudaStream_t m_main_stream = nullptr;
-	size_t m_n_streams;
+	size_t m_n_streams = 0;
 };
 
 TCNN_NAMESPACE_END

@@ -45,10 +45,23 @@ json merge_parent_network_config(const json& child,
 
 NerfRender::NerfRender() {
   m_network_config = {};
-  m_density_grid = GPUMemory<float>(1);
+  m_inference_stream.resize(NGPU);
+  for(uint64_t gpu=0;gpu<NGPU;gpu++){
+    cudaSetDevice(gpu);
+    cudaStreamCreate(&m_inference_stream[gpu]);
+
+    m_density_grid.emplace_back(GPUMemory<float>(1));
+    m_aabb.emplace_back(GPUMemory<float>(1));
+    m_rng.emplace_back(default_rng_t{m_seed});
+  }
 }
 
-NerfRender::~NerfRender() {}
+NerfRender::~NerfRender() {
+  delete [] deep_h;
+  delete [] image_h;
+  delete [] us_image;
+  delete [] us_depth;
+}
 
 json NerfRender::load_network_config(const fs::path& network_config_path) {
   if (!network_config_path.empty()) {
@@ -85,7 +98,10 @@ void NerfRender::reload_network_from_file(
     if (equals_case_insensitive(m_network_config_path.extension(), "msgpack")) {
       load_snapshot(network_config_path);
       reset_network();
-      m_nerf_network->deserialize(m_network_config["snapshot"]);
+      for(uint64_t gpu=0;gpu<NGPU;gpu++){
+        cudaSetDevice(gpu);
+        m_nerf_network[gpu]->deserialize(m_network_config["snapshot"]);
+      }
     } else {
       throw std::runtime_error{"Input file with wrong extension!"};
     }
@@ -93,9 +109,6 @@ void NerfRender::reload_network_from_file(
 }
 
 void NerfRender::reset_network() {
-  // reset the random seed
-  m_rng = default_rng_t{m_seed};
-
   // Default config
   json config = m_network_config;
   json& encoding_config = config["encoding"];
@@ -157,63 +170,69 @@ void NerfRender::reset_network() {
                  << " T=2^" << log2_hashmap_size << " L=" << m_num_levels;
   }
 
-  // Generate the network
-  m_nerf_network = std::make_shared<NerfNetwork<precision_t>>(
-      n_pos_dims, n_dir_dims, n_extra_dims,
-      n_pos_dims,  // The offset of 1 comes from the dt member variable of
-                       // NerfCoordinate. HACKY
-      encoding_config, dir_encoding_config, network_config, rgb_network_config);
+  for(uint64_t gpu=0;gpu<NGPU;gpu++){
+    cudaSetDevice(gpu);
+    // reset the random seed
+    m_rng[gpu] = default_rng_t{m_seed};
+    // Generate the network
+    m_nerf_network.emplace_back(std::make_shared<NerfNetwork<precision_t>>(
+        n_pos_dims, n_dir_dims, n_extra_dims,
+        n_pos_dims,  // The offset of 1 comes from the dt member variable of
+                        // NerfCoordinate. HACKY
+        encoding_config, dir_encoding_config, network_config, rgb_network_config));
+  }
 }
 
 void NerfRender::set_resolution(Eigen::Vector2i res)
 {
   resolution = res;
+  int N = res[0] * res[1] / NGPU;  // number of pixels
+  for(uint64_t gpu=0;gpu<NGPU;gpu++){
+    cudaSetDevice(gpu);
+    // initial points corresponding to pixels, in world coordination
+    rays_o.emplace_back(tcnn::GPUMatrixDynamic<float>(3, N, m_inference_stream[gpu], tcnn::RM));
+    // direction corresponding to pixels,in world coordination
+    rays_d.emplace_back(tcnn::GPUMatrixDynamic<float>(3, N, m_inference_stream[gpu], tcnn::RM));
+    // Calculate rays' intersection time (near and far) with aabb
+    nears.emplace_back(tcnn::GPUMatrixDynamic<float>(1, N, m_inference_stream[gpu], tcnn::RM));
+    fars.emplace_back(tcnn::GPUMatrixDynamic<float>(1, N, m_inference_stream[gpu], tcnn::RM));
+    //  allocate outputs
+    weight_sum.emplace_back(tcnn::GPUMatrixDynamic<float>(1, N, m_inference_stream[gpu], tcnn::RM));  // the accumlate weight of each ray
+    depth.emplace_back(tcnn::GPUMatrixDynamic<float>(1, N, m_inference_stream[gpu], tcnn::RM));  // output depth img
+    image.emplace_back(tcnn::GPUMatrixDynamic<float>(N, 3, m_inference_stream[gpu], tcnn::RM));  // output rgb image
+    // store the alive rays number
+    alive_counter.emplace_back(tcnn::GPUMatrixDynamic<int>(1, 1, m_inference_stream[gpu], tcnn::RM));
+    // the alive rays' IDs in N (N >= n_alive, but we only use first n_alive)
+    // 2 is used to loop old/new
+    rays_alive.emplace_back(tcnn::GPUMatrixDynamic<int>(2, N, m_inference_stream[gpu], tcnn::RM));
+    // the alive rays' time, we only use the first n_alive.
+    // dead rays are marked by rays_t < 0
+    //  2 is used to loop old/new
+    rays_t.emplace_back(tcnn::GPUMatrixDynamic<float>(2, N, m_inference_stream[gpu], tcnn::RM));
 
-  int N = resolution[0] * resolution[1];  // number of pixels
-  // initial points corresponding to pixels, in world coordination
-  rays_o = tcnn::GPUMatrixDynamic<float>(3, N, tcnn::RM);
-  // direction corresponding to pixels,in world coordination
-  rays_d = tcnn::GPUMatrixDynamic<float>(3, N, tcnn::RM);
-  // Calculate rays' intersection time (near and far) with aabb
-  nears = tcnn::GPUMatrixDynamic<float>(1, N, tcnn::RM);
-  fars = tcnn::GPUMatrixDynamic<float>(1, N, tcnn::RM);
-  //  allocate outputs
-  weight_sum = tcnn::GPUMatrixDynamic<float>(1, N, tcnn::RM);  // the accumlate weight of each ray
-  depth = tcnn::GPUMatrixDynamic<float>(1, N, tcnn::RM);  // output depth img
-  image = tcnn::GPUMatrixDynamic<float>(N, 3, tcnn::RM);  // output rgb image
-  // store the alive rays number
-  alive_counter = tcnn::GPUMatrixDynamic<int>(1, 1, tcnn::RM);
-  // the alive rays' IDs in N (N >= n_alive, but we only use first n_alive)
-  // 2 is used to loop old/new
-  rays_alive = tcnn::GPUMatrixDynamic<int>(2, N, tcnn::RM);
-  // the alive rays' time, we only use the first n_alive.
-  // dead rays are marked by rays_t < 0
-  //  2 is used to loop old/new
-  rays_t = tcnn::GPUMatrixDynamic<float>(2, N, tcnn::RM);
+    xyzs.emplace_back(tcnn::GPUMatrixDynamic<float>(3, div_round_up(N, 128) * 128, m_inference_stream[gpu], tcnn::CM));
+    // all generated points' view dirs.
+    dirs.emplace_back(tcnn::GPUMatrixDynamic<float>(3, div_round_up(N, 128) * 128, m_inference_stream[gpu], tcnn::CM));
+    // all generated points' deltas
+    //(here we record two deltas, the first is for RGB, the second for depth).
+    deltas.emplace_back(tcnn::GPUMatrixDynamic<float>(2, div_round_up(N, 128) * 128, m_inference_stream[gpu], tcnn::CM));
 
-  xyzs = tcnn::GPUMatrixDynamic<float>(3, div_round_up(N, 128) * 128, tcnn::CM);
-  // all generated points' view dirs.
-  dirs = tcnn::GPUMatrixDynamic<float>(3, div_round_up(N, 128) * 128, tcnn::CM);
-  // all generated points' deltas
-  //(here we record two deltas, the first is for RGB, the second for depth).
-  deltas = tcnn::GPUMatrixDynamic<float>(2, div_round_up(N, 128) * 128, tcnn::CM);
+    // volume density
+    sigmas.emplace_back(tcnn::GPUMatrixDynamic<float>(1, div_round_up(N, 128) * 128, m_inference_stream[gpu], tcnn::RM));
+    // emitted color
+    rgbs.emplace_back(tcnn::GPUMatrixDynamic<float>(div_round_up(N, 128) * 128, 3, m_inference_stream[gpu], tcnn::RM));
 
-  // volume density
-  sigmas = tcnn::GPUMatrixDynamic<float>(1, div_round_up(N, 128) * 128, tcnn::RM);
-  // emitted color
-  rgbs = tcnn::GPUMatrixDynamic<float>(div_round_up(N, 128) * 128, 3, tcnn::RM);
-
-  // concated input
-  network_input = tcnn::GPUMatrixDynamic<float>(m_nerf_network->input_width(),
-                                                div_round_up(N, 128) * 128, tcnn::RM);
-  // concated output
-  network_output = tcnn::GPUMatrixDynamic<precision_t>(
-        m_nerf_network->padded_output_width(), div_round_up(N, 128) * 128, tcnn::RM);
-  
-  deep_h = new float[N];
-  image_h = new float[N * 3];
-  us_image = new unsigned char [N*3];
-  us_depth = new unsigned char [N];
+    // concated input
+    network_input.emplace_back(tcnn::GPUMatrixDynamic<float>(m_nerf_network[gpu]->input_width(),
+                                                  div_round_up(N, 128) * 128, m_inference_stream[gpu], tcnn::RM));
+    // concated output
+    network_output.emplace_back(tcnn::GPUMatrixDynamic<precision_t>(
+          m_nerf_network[gpu]->padded_output_width(), div_round_up(N, 128) * 128, m_inference_stream[gpu], tcnn::RM));
+  }
+  deep_h = new float[N*NGPU];
+  image_h = new float[N*NGPU * 3];
+  us_image = new unsigned char [N*NGPU*3];
+  us_depth = new unsigned char [N*NGPU];
 }
 
 Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos) {
@@ -221,153 +240,162 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
   // pos : camera external parameters
   // resolution : [Width, Height]
 
-  int N = resolution[0] * resolution[1];  // number of pixels
+  int N = resolution[0] * resolution[1] / NGPU;  // number of pixels
 
   // functions to generate rays_o and rays_d, it takes camera parameters and
   // resolution as input
-  generate_rays(cam, pos, resolution, rays_o, rays_d);
+  generate_rays(cam, pos);
+  for(uint64_t gpu=0;gpu<NGPU;gpu++){
+    cudaSetDevice(gpu);
+    // caliucate nears and fars
+    kernel_near_far_from_aabb<<<div_round_up(N, m_num_thread), m_num_thread, 0, m_inference_stream[gpu]>>>(
+        rays_o[gpu].view(), rays_d[gpu].view(), m_aabb[gpu].data(), N, m_min_near, nears[gpu].view(),
+        fars[gpu].view());
 
+    // initial weight_sum, image and depth with 0
+    weight_sum[gpu].initialize_constant(0); 
+    depth[gpu].initialize_constant(0);
+    image[gpu].initialize_constant(0);
+    // std::cout << "initial weight_sum, image and depth with 0" << std::endl;
 
-  // caliucate nears and fars
-  kernel_near_far_from_aabb<<<div_round_up(N, m_num_thread), m_num_thread>>>(
-      rays_o.view(), rays_d.view(), m_aabb.data(), N, m_min_near, nears.view(),
-      fars.view());
-
-  // initial weight_sum, image and depth with 0
-  weight_sum.initialize_constant(0); 
-  depth.initialize_constant(0);
-  image.initialize_constant(0);
-  std::cout << "initial weight_sum, image and depth with 0" << std::endl;
-
-  int num_alive = N;  // initialize the initial number alive as N
-  // initial with 0
-  alive_counter.initialize_constant(0);
-  rays_alive.initialize_constant(0);
-  rays_t.initialize_constant(0);
-  std::cout << "initial alive_counter rays_alive rays_t with 0" << std::endl;
-
-  int step = 0;          // the current march step
-  int i = 0;             // the flag to index old and new rays
-  while (step < m_max_infer_steps) {
-    if (step == 0) {
-      // init rays at first step
-      init_step0<<<div_round_up(num_alive, m_num_thread), m_num_thread>>>(
-          rays_alive.view(), rays_t.view(), num_alive, nears.view());
-    } else {
-      // initialize alive_couter's value with 0
-      int tmp_value = 0;
-      cudaMemcpy(&alive_counter.view()(0, 0), &tmp_value, 1 * sizeof(int),
-                 cudaMemcpyHostToDevice);
-
-      // remove dead rays and reallocate alive rays, to accelerate next ray
-      // marching
-      int new_i = i % 2;
-      int old_i = (i + 1) % 2;
-      kernel_compact_rays<<<div_round_up(num_alive, m_num_thread), m_num_thread>>>(
-          num_alive, rays_alive.view(), rays_t.view(), alive_counter.view(),
-          new_i, old_i);
-      cudaMemcpy(&num_alive, &alive_counter.view()(0, 0), 1 * sizeof(int),
-                 cudaMemcpyDeviceToHost);
-    }
-    if (num_alive <= 0) {
-      break;  // exit loop if no alive rays
-    }
-
-    // decide compact_steps
-    int num_step = max(min(N / num_alive, 8), 1);
-    // round it to the multiply of 128
-    int step_x_alive = div_round_up(num_alive * num_step, 128) * 128;
-
-    // march rays
-    kernel_march_rays<<<div_round_up(num_alive, m_num_thread), m_num_thread>>>(
-        num_alive, num_step, rays_alive.view(), rays_t.view(), rays_o.view(),
-        rays_d.view(), m_bound, m_dt_gamma, m_dg_cascade, m_dg_h,
-        m_density_grid.data(), m_mean_density, nears.view(), fars.view(),
-        xyzs.view(), dirs.view(), deltas.view(), m_perturb, i);
-
-    tcnn::linear_kernel(linear_transformer<float>, 0, nullptr, step_x_alive * 3,
-      1.0/(2 * m_bound), 0.5, xyzs.data(), xyzs.data());
-    tcnn::linear_kernel(linear_transformer<float>, 0, nullptr, step_x_alive * 3,
-      0.5, 0.5, dirs.data(), dirs.data());
-    concat_network_in_and_out<<<div_round_up(step_x_alive, m_num_thread),
-                                m_num_thread>>>(
-        xyzs.view(), dirs.view(),
-        network_input.view(), step_x_alive, xyzs.rows(), dirs.rows());
-    // forward through the network
-    m_nerf_network->inference_mixed_precision_impl(
-        nullptr, network_input, network_output);
-
-    // decompose network output
-    decompose_network_in_and_out<<<div_round_up(step_x_alive, m_num_thread),
-                                   m_num_thread>>>(
-        sigmas.view(), rgbs.view(), network_output.view(), step_x_alive,
-        sigmas.rows(), rgbs.cols());
-    matrix_multiply_1x1n<<<div_round_up(step_x_alive, m_num_thread), m_num_thread>>>(
-        m_density_scale, step_x_alive, sigmas.view());
-
-    // composite rays
-    kernel_composite_rays<<<div_round_up(num_alive, m_num_thread), m_num_thread>>>(
-        num_alive, num_step, rays_alive.view(), rays_t.view(), sigmas.view(),
-        rgbs.view(), deltas.view(), weight_sum.view(), depth.view(),
-        image.view(), i);
-    step += num_step;
-    i += 1;
+    // initial with 0
+    alive_counter[gpu].initialize_constant(0);
+    rays_alive[gpu].initialize_constant(0);
+    rays_t[gpu].initialize_constant(0);
+    // std::cout << "initial alive_counter rays_alive rays_t with 0" << std::endl;
   }
-  std::cout << "get image and depth" << std::endl;
-  // get final image and depth
-  get_image_and_depth<<<div_round_up(N, m_num_thread), m_num_thread>>>(
-      image.view(), depth.view(), nears.view(), fars.view(), weight_sum.view(),
-      m_bg_color, N);
+    std::vector<int> step(NGPU,0);          // the current march step
+    std::vector<int> i(NGPU,0);             // the flag to index old and new rays
+    std::vector<bool> running(NGPU,true);
+    std::vector<int> num_alive(NGPU,N);  // initialize the initial number alive as N
+    while(running[0]||running[1]){
+      // while (step[0] < m_max_infer_steps || step[1] < m_max_infer_steps) {
+      for(uint64_t gpu=0;gpu<NGPU;gpu++){
+        cudaSetDevice(gpu);
+        if(step[gpu]>=m_max_infer_steps){
+          running[gpu] = false;
+          continue;
+        }
+        if (step[gpu] == 0) {
+          // init rays at first step
+          init_step0<<<div_round_up(num_alive[gpu], m_num_thread), m_num_thread, 0, m_inference_stream[gpu]>>>(
+              rays_alive[gpu].view(), rays_t[gpu].view(), num_alive[gpu], nears[gpu].view());
+        } else {
+          // initialize alive_couter's value with 0
+          int tmp_value = 0;
+          cudaMemcpyAsync(&alive_counter[gpu].view()(0, 0), &tmp_value, 1 * sizeof(int),
+                    cudaMemcpyHostToDevice, m_inference_stream[gpu]);
 
-  cudaMemcpy(deep_h, &depth.view()(0, 0), N * sizeof(float), cudaMemcpyDeviceToHost);
-  cudaMemcpy(image_h, &image.view()(0, 0), N * sizeof(float) * 3, cudaMemcpyDeviceToHost);
-  
-  #pragma omp parallel for num_threads(8)
-  for (int i = 0; i < N ; i++) {
-    us_depth[i] = (unsigned char) (255.0 * deep_h[i]);
-    us_image[i*3] = (unsigned char) (255.0 * image_h[i*3]); 
-    us_image[i*3+1] = (unsigned char) (255.0 * image_h[i*3+1]); 
-    us_image[i*3+2] = (unsigned char) (255.0 * image_h[i*3+2]); 
-  }
+          // remove dead rays and reallocate alive rays, to accelerate next ray
+          // marching
+          int new_i = i[gpu] % 2;
+          int old_i = (i[gpu] + 1) % 2;
+          kernel_compact_rays<<<div_round_up(num_alive[gpu], m_num_thread), m_num_thread, 0, m_inference_stream[gpu]>>>(
+              num_alive[gpu], rays_alive[gpu].view(), rays_t[gpu].view(), alive_counter[gpu].view(),
+              new_i, old_i);
+          cudaMemcpyAsync(&num_alive[gpu], &alive_counter[gpu].view()(0, 0), 1 * sizeof(int),
+                    cudaMemcpyDeviceToHost, m_inference_stream[gpu]);
+        }
+        if (num_alive[gpu] <= 0) {
+          running[gpu] = false;  // exit loop if no alive rays
+          continue;
+        }
+
+        // decide compact_steps
+        int num_step = max(min(N / num_alive[gpu], 8), 1);
+        // round it to the multiply of 128
+        int step_x_alive = div_round_up(num_alive[gpu] * num_step, 128) * 128;
+
+        // march rays
+        kernel_march_rays<<<div_round_up(num_alive[gpu], m_num_thread), m_num_thread, 0, m_inference_stream[gpu]>>>(
+            num_alive[gpu], num_step, rays_alive[gpu].view(), rays_t[gpu].view(), rays_o[gpu].view(),
+            rays_d[gpu].view(), m_bound, m_dt_gamma, m_dg_cascade, m_dg_h,
+            m_density_grid[gpu].data(), m_mean_density, nears[gpu].view(), fars[gpu].view(),
+            xyzs[gpu].view(), dirs[gpu].view(), deltas[gpu].view(), m_perturb, i[gpu]);
+
+        tcnn::linear_kernel(linear_transformer<float>, 0, m_inference_stream[gpu], step_x_alive * 3,
+          1.0/(2 * m_bound), 0.5, xyzs[gpu].data(), xyzs[gpu].data());
+        tcnn::linear_kernel(linear_transformer<float>, 0, m_inference_stream[gpu], step_x_alive * 3,
+          0.5, 0.5, dirs[gpu].data(), dirs[gpu].data());
+        concat_network_in_and_out<<<div_round_up(step_x_alive, m_num_thread),
+                                    m_num_thread, 0, m_inference_stream[gpu]>>>(
+            xyzs[gpu].view(), dirs[gpu].view(),
+            network_input[gpu].view(), step_x_alive, xyzs[gpu].rows(), dirs[gpu].rows());
+        // forward through the network
+        m_nerf_network[gpu]->inference_mixed_precision_impl(
+            m_inference_stream[gpu], network_input[gpu], network_output[gpu]);
+
+        // decompose network output
+        decompose_network_in_and_out<<<div_round_up(step_x_alive, m_num_thread),
+                                      m_num_thread, 0, m_inference_stream[gpu]>>>(
+            sigmas[gpu].view(), rgbs[gpu].view(), network_output[gpu].view(), step_x_alive,
+            sigmas[gpu].rows(), rgbs[gpu].cols());
+        matrix_multiply_1x1n<<<div_round_up(step_x_alive, m_num_thread), m_num_thread, 0, m_inference_stream[gpu]>>>(
+            m_density_scale, step_x_alive, sigmas[gpu].view());
+
+        // composite rays
+        kernel_composite_rays<<<div_round_up(num_alive[gpu], m_num_thread), m_num_thread, 0, m_inference_stream[gpu]>>>(
+            num_alive[gpu], num_step, rays_alive[gpu].view(), rays_t[gpu].view(), sigmas[gpu].view(),
+            rgbs[gpu].view(), deltas[gpu].view(), weight_sum[gpu].view(), depth[gpu].view(),
+            image[gpu].view(), i[gpu]);
+        step[gpu] += num_step;
+        i[gpu] += 1;
+      }
+    }
+
+    for(uint64_t gpu=0;gpu<NGPU;gpu++){
+        cudaSetDevice(gpu);
+      // std::cout << "get image and depth" << std::endl;
+      // get final image and depth
+      get_image_and_depth<<<div_round_up(N, m_num_thread), m_num_thread, 0, m_inference_stream[gpu]>>>(
+          image[gpu].view(), depth[gpu].view(), nears[gpu].view(), fars[gpu].view(), weight_sum[gpu].view(),
+          m_bg_color, N);
+
+      int offset = gpu*N;
+      cudaMemcpyAsync(deep_h+offset, &depth[gpu].view()(0, 0), N * sizeof(float), cudaMemcpyDeviceToHost), m_inference_stream[gpu];
+      cudaMemcpyAsync(image_h+3*offset, &image[gpu].view()(0, 0), N * sizeof(float) * 3, cudaMemcpyDeviceToHost, m_inference_stream[gpu]);
+      cudaStreamSynchronize(m_inference_stream[gpu]);
+      #pragma omp parallel for num_threads(8)
+      for (int i = 0; i < N ; i++) {
+        int in_i  = gpu*N+i;
+        int out_i = NGPU*i+gpu;
+        us_depth[out_i] = (unsigned char) (255.0 * deep_h[in_i]);
+        us_image[out_i*3] = (unsigned char) (255.0 * image_h[in_i*3]); 
+        us_image[out_i*3+1] = (unsigned char) (255.0 * image_h[in_i*3+1]); 
+        us_image[out_i*3+2] = (unsigned char) (255.0 * image_h[in_i*3+2]); 
+      }
+    }
 
   Image img(resolution[0], resolution[1], us_image, us_depth);
   return img;
 }
 
-void NerfRender::generate_rays(struct Camera cam,
-                               Eigen::Matrix<float, 4, 4> pos,
-                               Eigen::Vector2i resolution,
-                               tcnn::GPUMatrixDynamic<float>& rays_o,
-                               tcnn::GPUMatrixDynamic<float>& rays_d) {
+void NerfRender::generate_rays(struct Camera cam, Eigen::Matrix<float, 4, 4> pos) {
 
-  int N = resolution[0] * resolution[1];  // number of pixels
-  std::cout << "N: " << N << std::endl;
+  int N = resolution[0] * resolution[1] / NGPU;  // number of pixels
+  // std::cout << "N: " << N << std::endl;
 
   Eigen::Matrix<float, 4, 4> new_pose = nerf_matrix_to_ngp(pos, m_scale);
 
   int grid_size = ((N + m_num_thread) / m_num_thread);
 
-  tcnn::MatrixView<float> rays_o_view = rays_o.view();
-  set_rays_o<<<grid_size, m_num_thread>>>(rays_o_view, new_pose.block<3, 1>(0, 3), N);
-
-  tcnn::MatrixView<float> rays_d_view = rays_d.view();
-  set_rays_d<<<grid_size, m_num_thread>>>(
-      rays_d_view, cam, new_pose.block<3, 3>(0, 0), resolution[0], N);
+  for(uint64_t gpu=0;gpu<NGPU;gpu++){
+    cudaSetDevice(gpu);
+    set_rays_o<<<grid_size, m_num_thread, 0, m_inference_stream[gpu]>>>(rays_o[gpu].view(), new_pose.block<3, 1>(0, 3), N);
+    set_rays_d<<<grid_size, m_num_thread, 0, m_inference_stream[gpu]>>>(rays_d[gpu].view(), cam, new_pose.block<3, 3>(0, 0), resolution[0], N, gpu);
+  }
 }
 
 void NerfRender::generate_density_grid() {
   const uint32_t H = m_dg_h;
 	const uint32_t H2= H*H;
-	// const uint32_t H3= H*H;//*H;
 	const uint32_t H3= H*H*H;
 	const float decay = 0.95;
-	std::cout << "dg size: " << m_density_grid.size() << std::endl;
 	std::vector<float> tmpV(m_dg_cascade*H3, 1.0/64);
-	std::cout << "tmpV size: " << tmpV.size() << std::endl;
-	m_density_grid.resize(m_dg_cascade*H3);
-	m_density_grid.copy_from_host(tmpV);
-	
-	std::cout << "dg size: " << m_density_grid.size() << std::endl;
+  cudaSetDevice(0);
+
+  m_density_grid[0].resize_and_copy_from_host(tmpV,tmpV.size());
+	std::cout << "dg size: " << m_density_grid[0].size() << std::endl;
 	tcnn::GPUMatrixDynamic<float> xyzs(3,H3);
 	tcnn::GPUMatrixDynamic<float> cas_xyzs(3,H3);
 	tcnn::GPUMatrixDynamic<precision_t> density_out(16,H3);
@@ -376,21 +404,29 @@ void NerfRender::generate_density_grid() {
 	int block_size = H;
   int grid_size = 3*H3/block_size;
 
-	init_xyzs <<<grid_size, block_size>>> (xyzs.data(), 3*H3);
+	init_xyzs <<<grid_size, block_size, 0, m_inference_stream[0]>>> (xyzs.data(), 3*H3);
 
 	for(int cas=0;cas<m_dg_cascade;cas++){
 		float bound = 1<<cas < m_bound ? 1<<cas : m_bound;
 		float half_grid_size = bound/H;
 
-		dd_scale   <<<grid_size, block_size>>> (xyzs.data(), cas_xyzs.data(), 3*H3, bound-half_grid_size);
-		add_random <<<grid_size, block_size>>> (cas_xyzs.data(), m_rng, 3*H3, half_grid_size);
+		dd_scale   <<<grid_size, block_size, 0, m_inference_stream[0]>>> (xyzs.data(), cas_xyzs.data(), 3*H3, bound-half_grid_size);
+		add_random <<<grid_size, block_size, 0, m_inference_stream[0]>>> (cas_xyzs.data(), m_rng[0], 3*H3, half_grid_size);
 
 		// m_nerf_network->density(nullptr,cas_xyzs,density_out);
 
-		dd_scale  <<<H2, H>>> (density_out.slice_rows(0, 1).data(), tmp_density.data(), H3, 0.001691);
+		dd_scale  <<<H2, H, 0, m_inference_stream[0]>>> (density_out.slice_rows(0, 1).data(), tmp_density.data(), H3, 0.001691);
 	}
 
-	dg_update <<<H2, H>>> (m_density_grid.data(), tmp_density.data(), decay, H3);
+	dg_update <<<H2, H, 0, m_inference_stream[0]>>> (m_density_grid[0].data(), tmp_density.data(), decay, H3);
+
+#if NGPU > 1
+  m_density_grid[0].copy_to_host(tmpV);
+  for(uint64_t gpu=1;gpu<NGPU;gpu++){
+    cudaSetDevice(gpu);
+    m_density_grid[gpu].resize_and_copy_from_host(tmpV,tmpV.size());
+  }
+#endif
 }
 
 void NerfRender::load_snapshot(const std::string& filepath_string){
@@ -407,7 +443,6 @@ void NerfRender::load_snapshot(const std::string& filepath_string){
   for(int i=0;i<snapshot["aabb"].size();i++){
     tmp_aabb[i] = snapshot["aabb"].at(i);
   }
-  m_aabb.resize_and_copy_from_host(tmp_aabb);
 	m_bound = snapshot.value("bound", m_bound);
 	m_scale = snapshot.value("scale", m_scale);
   m_dg_cascade = snapshot.value("cascade", m_dg_cascade);
@@ -421,12 +456,16 @@ void NerfRender::load_snapshot(const std::string& filepath_string){
     << "\t" << tmp_density_grid[66 * m_dg_h * m_dg_h + 66 * m_dg_h + 67]
     << "\t" << tmp_density_grid[66 * m_dg_h * m_dg_h + 66 * m_dg_h + 68]
     << "\tDG";
-  m_density_grid.resize_and_copy_from_host(tmp_density_grid);
+  for(uint64_t gpu=0;gpu<NGPU;gpu++){
+    cudaSetDevice(gpu);
+    m_aabb[gpu].resize_and_copy_from_host(tmp_aabb);
+    m_density_grid[gpu].resize_and_copy_from_host(tmp_density_grid);
+  }
   float host_data[3] = {0};
-  cudaMemcpy(host_data, &m_density_grid.data()[66 * m_dg_h * m_dg_h + 66 * m_dg_h + 66], 3 * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpy(host_data, &m_density_grid[0].data()[66 * m_dg_h * m_dg_h + 66 * m_dg_h + 66], 3 * sizeof(float), cudaMemcpyDeviceToHost);
   tlog::info() << "density grid : " << host_data[0] << "\t" << host_data[1] << "\t" << host_data[2];
 
-	if (m_density_grid.size() != m_dg_h * m_dg_h * m_dg_h * m_dg_cascade) {
+	if (m_density_grid[0].size() != m_dg_h * m_dg_h * m_dg_h * m_dg_cascade) {
 		throw std::runtime_error{"Incompatible number of grid cascades."};
 	}
 

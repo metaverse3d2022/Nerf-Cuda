@@ -1,0 +1,3 @@
+[submodule "dependencies/tiny-cuda-nn/dependencies/fmt"]
+	path = dependencies/tiny-cuda-nn/dependencies/fmt
+	url = https://github.com/fmtlib/fmt.git
