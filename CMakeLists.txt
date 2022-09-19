@@ -88,6 +88,7 @@ list(APPEND CUDA_NVCC_FLAGS "--expt-relaxed-constexpr")
 set(TCNN_BUILD_BENCHMARK OFF)
 set(TCNN_BUILD_EXAMPLES OFF)
 add_subdirectory(dependencies/tiny-cuda-nn)
+set(CMAKE_CUDA_ARCHITECTURES ${TCNN_CUDA_ARCHITECTURES})
 include_directories("dependencies/tiny-cuda-nn/include")
 include_directories("dependencies/tiny-cuda-nn/dependencies")
 
