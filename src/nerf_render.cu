@@ -187,6 +187,8 @@ void NerfRender::set_resolution(Eigen::Vector2i res)
 {
   resolution = res;
   int N = res[0] * res[1] / NGPU;  // number of pixels
+  zeros_f = std::vector<float>(3*N,0);
+  zeros_i = std::vector<int>(2*N,0);
   for(uint64_t gpu=0;gpu<NGPU;gpu++){
     cudaSetDevice(gpu);
     // initial points corresponding to pixels, in world coordination
@@ -253,29 +255,31 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
         fars[gpu].view());
 
     // initial weight_sum, image and depth with 0
-    weight_sum[gpu].initialize_constant(0); 
-    depth[gpu].initialize_constant(0);
-    image[gpu].initialize_constant(0);
+    cudaMemcpyAsync(weight_sum[gpu].data(), zeros_f.data(), weight_sum[gpu].n_bytes(), cudaMemcpyHostToDevice, m_inference_stream[gpu]);
+    cudaMemcpyAsync(depth[gpu].data(), zeros_f.data(), depth[gpu].n_bytes(), cudaMemcpyHostToDevice, m_inference_stream[gpu]);
+    cudaMemcpyAsync(image[gpu].data(), zeros_f.data(), image[gpu].n_bytes(), cudaMemcpyHostToDevice, m_inference_stream[gpu]);
+    cudaMemcpyAsync(alive_counter[gpu].data(), zeros_i.data(), alive_counter[gpu].n_bytes(), cudaMemcpyHostToDevice, m_inference_stream[gpu]);
+    cudaMemcpyAsync(rays_alive[gpu].data(), zeros_i.data(), rays_alive[gpu].n_bytes(), cudaMemcpyHostToDevice, m_inference_stream[gpu]);
+    cudaMemcpyAsync(rays_t[gpu].data(), zeros_f.data(), rays_t[gpu].n_bytes(), cudaMemcpyHostToDevice, m_inference_stream[gpu]);
     // std::cout << "initial weight_sum, image and depth with 0" << std::endl;
 
-    // initial with 0
-    alive_counter[gpu].initialize_constant(0);
-    rays_alive[gpu].initialize_constant(0);
-    rays_t[gpu].initialize_constant(0);
     // std::cout << "initial alive_counter rays_alive rays_t with 0" << std::endl;
   }
     std::vector<int> step(NGPU,0);          // the current march step
     std::vector<int> i(NGPU,0);             // the flag to index old and new rays
     std::vector<bool> running(NGPU,true);
     std::vector<int> num_alive(NGPU,N);  // initialize the initial number alive as N
-    while(running[0]||running[1]){
+    int run_counter = NGPU;
+    while(run_counter>0){
       // while (step[0] < m_max_infer_steps || step[1] < m_max_infer_steps) {
       for(uint64_t gpu=0;gpu<NGPU;gpu++){
-        cudaSetDevice(gpu);
+        if(!running[gpu]) continue;
         if(step[gpu]>=m_max_infer_steps){
           running[gpu] = false;
+          --run_counter;
           continue;
         }
+        cudaSetDevice(gpu);
         if (step[gpu] == 0) {
           // init rays at first step
           init_step0<<<div_round_up(num_alive[gpu], m_num_thread), m_num_thread, 0, m_inference_stream[gpu]>>>(
@@ -298,6 +302,7 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
         }
         if (num_alive[gpu] <= 0) {
           running[gpu] = false;  // exit loop if no alive rays
+          --run_counter;
           continue;
         }
 
@@ -330,7 +335,7 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
                                       m_num_thread, 0, m_inference_stream[gpu]>>>(
             sigmas[gpu].view(), rgbs[gpu].view(), network_output[gpu].view(), step_x_alive,
             sigmas[gpu].rows(), rgbs[gpu].cols());
-        matrix_multiply_1x1n<<<div_round_up(step_x_alive, m_num_thread), m_num_thread, 0, m_inference_stream[gpu]>>>(
+        if(m_density_scale!=1) matrix_multiply_1x1n<<<div_round_up(step_x_alive, m_num_thread), m_num_thread, 0, m_inference_stream[gpu]>>>(
             m_density_scale, step_x_alive, sigmas[gpu].view());
 
         // composite rays
@@ -354,7 +359,12 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
       int offset = gpu*N;
       cudaMemcpyAsync(deep_h+offset, &depth[gpu].view()(0, 0), N * sizeof(float), cudaMemcpyDeviceToHost), m_inference_stream[gpu];
       cudaMemcpyAsync(image_h+3*offset, &image[gpu].view()(0, 0), N * sizeof(float) * 3, cudaMemcpyDeviceToHost, m_inference_stream[gpu]);
+    }
+    for(uint64_t gpu=0;gpu<NGPU;gpu++){
+      cudaSetDevice(gpu);
       cudaStreamSynchronize(m_inference_stream[gpu]);
+    }
+    for(uint64_t gpu=0;gpu<NGPU;gpu++){
       #pragma omp parallel for num_threads(8)
       for (int i = 0; i < N ; i++) {
         int in_i  = gpu*N+i;
