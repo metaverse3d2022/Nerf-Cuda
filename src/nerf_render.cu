@@ -255,15 +255,12 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
         fars[gpu].view());
 
     // initial weight_sum, image and depth with 0
-    cudaMemcpyAsync(weight_sum[gpu].data(), zeros_f.data(), weight_sum[gpu].n_bytes(), cudaMemcpyHostToDevice, m_inference_stream[gpu]);
-    cudaMemcpyAsync(depth[gpu].data(), zeros_f.data(), depth[gpu].n_bytes(), cudaMemcpyHostToDevice, m_inference_stream[gpu]);
-    cudaMemcpyAsync(image[gpu].data(), zeros_f.data(), image[gpu].n_bytes(), cudaMemcpyHostToDevice, m_inference_stream[gpu]);
-    cudaMemcpyAsync(alive_counter[gpu].data(), zeros_i.data(), alive_counter[gpu].n_bytes(), cudaMemcpyHostToDevice, m_inference_stream[gpu]);
-    cudaMemcpyAsync(rays_alive[gpu].data(), zeros_i.data(), rays_alive[gpu].n_bytes(), cudaMemcpyHostToDevice, m_inference_stream[gpu]);
-    cudaMemcpyAsync(rays_t[gpu].data(), zeros_f.data(), rays_t[gpu].n_bytes(), cudaMemcpyHostToDevice, m_inference_stream[gpu]);
-    // std::cout << "initial weight_sum, image and depth with 0" << std::endl;
-
-    // std::cout << "initial alive_counter rays_alive rays_t with 0" << std::endl;
+    parallel_for_gpu(m_inference_stream[gpu], weight_sum[gpu].n_elements(), [params_fp=weight_sum[gpu].data()] __device__ (size_t i) { params_fp[i] = 0; });
+    parallel_for_gpu(m_inference_stream[gpu], depth[gpu].n_elements(), [params_fp=depth[gpu].data()] __device__ (size_t i) { params_fp[i] = 0;});
+    parallel_for_gpu(m_inference_stream[gpu], image[gpu].n_elements(), [params_fp=image[gpu].data()] __device__ (size_t i) { params_fp[i] = 0;});
+    parallel_for_gpu(m_inference_stream[gpu], alive_counter[gpu].n_elements(), [params_fp=alive_counter[gpu].data()] __device__ (size_t i) { params_fp[i] = 0;});
+    parallel_for_gpu(m_inference_stream[gpu], rays_alive[gpu].n_elements(), [params_fp=rays_alive[gpu].data()] __device__ (size_t i) {params_fp[i] = 0;});
+    parallel_for_gpu(m_inference_stream[gpu], rays_t[gpu].n_elements(), [params_fp=rays_t[gpu].data()] __device__ (size_t i) { params_fp[i] = 0; });
   }
     std::vector<int> step(NGPU,0);          // the current march step
     std::vector<int> i(NGPU,0);             // the flag to index old and new rays

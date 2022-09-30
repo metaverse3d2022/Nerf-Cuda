@@ -24,6 +24,7 @@
 #include <args/args.hxx>
 #include <iostream>
 #include <string>
+#include <time.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image/stb_image_write.h>
@@ -38,19 +39,23 @@ int main(int argc, char** argv) {
 
   cout << "Hello, Metavese!" << endl;
   NerfRender* render = new NerfRender();
-  string config_path = "/home/xuhangkun/result/nerf/test.msgpack";
+  string config_path = "/home/xuhangkun/result/msgpacks/freality.msgpack";
   render->reload_network_from_file(config_path);  // Init Model
-  Camera cam = {1375.52, 1374.49, 554.558, 965.268};
+  Camera cam = {3550.115/4, 3554.515/4, 3010.45/4, 1996.027/4};
   Eigen::Matrix<float, 4, 4> pos;
-  pos << 0.8926439112348871, 0.08799600283226543, 0.4420900262071262, 3.168359405609479,
-      0.4464189982715247, -0.03675452191179031, -0.8940689141475064, -5.4794898611466945,
-      -0.062425682580756266, 0.995442519072023, -0.07209178487538156, -0.9791660699008925,
+  pos << -0.5575427361517304, -0.11682263918046752, 0.8218871992959822, 3.9673954052389253,
+      0.8300327085486383, -0.094966079921629, 0.5495699649760266, 2.667431152445114,
+      0.013849191732089516, 0.9886020001326434, 0.14991425965987268, 0.45955395816033995,
       0.0, 0.0, 0.0, 1.0;
-  Eigen::Vector2i resolution(1080, 1080);
+  Eigen::Vector2i resolution(4000/4, 4000/4);
   assert(resolution[0]*resolution[1]%NGPU==0);
   render -> set_resolution(resolution);
+  clock_t start_t, end_t;
+  start_t = clock();
   Image img = render->render_frame(cam, pos);
-  for(int i=0;i<20;i++) img = render->render_frame(cam, pos);
+  end_t = clock();
+  double total_time = static_cast<double> (end_t - start_t) / 1 / CLOCKS_PER_SEC;
+  printf("Process time : %f s / frame", total_time);
   // store images
   char const* deep_file_name = "./deep.png";
   char const* image_file_name = "./image.png";
