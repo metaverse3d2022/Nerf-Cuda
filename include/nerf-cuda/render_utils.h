@@ -256,8 +256,9 @@ __global__ void get_image_and_depth(
   // use the grid-stride-loops
   for (int n = indexWithinTheGrid; n < N; n += gridStride) {
     auto inf = std::numeric_limits<float>::infinity();
-    image_view(n, 0) =
-        image_view(n, 0) + (1 - weights_sum_view(0, n)) * bg_color;
+    image_view(n, 0) = image_view(n, 0) + (1 - weights_sum_view(0, n)) * bg_color;
+    image_view(n, 1) = image_view(n, 1) + (1 - weights_sum_view(0, n)) * bg_color;
+    image_view(n, 2) = image_view(n, 2) + (1 - weights_sum_view(0, n)) * bg_color;
     depth_view(0, n) = clamp(depth_view(0, n) - nears_view(0, n), 0, inf) /
                        (fars_view(0, n) - nears_view(0, n));
   }
@@ -700,7 +701,7 @@ __global__ void kernel_composite_rays(
       if (deltas(0, deltas_loc) == 0) break;
 
       const float alpha =
-          1.0f - __expf(-sigmas(0, sigmas_loc) * deltas(sigmas_loc, 0));
+          1.0f - __expf(-sigmas(0, sigmas_loc) * deltas(0, deltas_loc));
 
       /*
       T_0 = 1; T_i = \prod_{j=0}^{i-1} (1 - alpha_j)

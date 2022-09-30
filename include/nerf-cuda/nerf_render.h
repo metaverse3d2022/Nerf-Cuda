@@ -76,6 +76,8 @@ class NerfRender {
   int m_num_thread = 128;
   int m_max_infer_steps = 1024;
 
+  std::vector<float> zeros_f;
+  std::vector<int> zeros_i;
   // middle variable
   Eigen::Vector2i resolution;
   // initial points corresponding to pixels, in world coordination
