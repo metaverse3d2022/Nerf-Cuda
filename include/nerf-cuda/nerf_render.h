@@ -20,6 +20,7 @@
 #include <tiny-cuda-nn/gpu_memory.h>
 #include <tiny-cuda-nn/random.h>
 
+#include <thread>
 #include <json/json.hpp>
 #include <nerf-cuda/common_device.cuh>
 
@@ -43,7 +44,7 @@ class NerfRender {
       struct Camera cam, Eigen::Matrix<float, 4, 4> pos);  // render an image according to camera inner
                                     // parameters and outer parameters.
 
-  void generate_rays(struct Camera cam, Eigen::Matrix<float, 4, 4> pos);
+  void generate_rays(struct Camera cam, Eigen::Matrix<float, 4, 4> pos, int threadid);
 
   void generate_density_grid();
   void load_snapshot(const std::string& filepath_string);
@@ -76,8 +77,7 @@ class NerfRender {
   int m_num_thread = 128;
   int m_max_infer_steps = 1024;
 
-  std::vector<float> zeros_f;
-  std::vector<int> zeros_i;
+  std::vector<std::thread> threads;
   // middle variable
   Eigen::Vector2i resolution;
   // initial points corresponding to pixels, in world coordination

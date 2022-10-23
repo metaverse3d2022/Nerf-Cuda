@@ -187,8 +187,6 @@ void NerfRender::set_resolution(Eigen::Vector2i res)
 {
   resolution = res;
   int N = res[0] * res[1] / NGPU;  // number of pixels
-  zeros_f = std::vector<float>(3*N,0);
-  zeros_i = std::vector<int>(2*N,0);
   for(uint64_t gpu=0;gpu<NGPU;gpu++){
     cudaSetDevice(gpu);
     // initial points corresponding to pixels, in world coordination
@@ -243,12 +241,18 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
   // resolution : [Width, Height]
 
   int N = resolution[0] * resolution[1] / NGPU;  // number of pixels
+  std::vector<int> step(NGPU,0);          // the current march step
+  std::vector<int> i(NGPU,0);             // the flag to index old and new rays
+  std::vector<bool> running(NGPU,true);
+  std::vector<int> num_alive(NGPU,N);  // initialize the initial number alive as N
+  threads.clear();
 
   // functions to generate rays_o and rays_d, it takes camera parameters and
   // resolution as input
-  generate_rays(cam, pos);
   for(uint64_t gpu=0;gpu<NGPU;gpu++){
+    threads.emplace_back(std::thread([&,gpu](){
     cudaSetDevice(gpu);
+    generate_rays(cam, pos, int(gpu));
     // caliucate nears and fars
     kernel_near_far_from_aabb<<<div_round_up(N, m_num_thread), m_num_thread, 0, m_inference_stream[gpu]>>>(
         rays_o[gpu].view(), rays_d[gpu].view(), m_aabb[gpu].data(), N, m_min_near, nears[gpu].view(),
@@ -261,22 +265,12 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
     parallel_for_gpu(m_inference_stream[gpu], alive_counter[gpu].n_elements(), [params_fp=alive_counter[gpu].data()] __device__ (size_t i) { params_fp[i] = 0;});
     parallel_for_gpu(m_inference_stream[gpu], rays_alive[gpu].n_elements(), [params_fp=rays_alive[gpu].data()] __device__ (size_t i) {params_fp[i] = 0;});
     parallel_for_gpu(m_inference_stream[gpu], rays_t[gpu].n_elements(), [params_fp=rays_t[gpu].data()] __device__ (size_t i) { params_fp[i] = 0; });
-  }
-    std::vector<int> step(NGPU,0);          // the current march step
-    std::vector<int> i(NGPU,0);             // the flag to index old and new rays
-    std::vector<bool> running(NGPU,true);
-    std::vector<int> num_alive(NGPU,N);  // initialize the initial number alive as N
-    int run_counter = NGPU;
-    while(run_counter>0){
-      // while (step[0] < m_max_infer_steps || step[1] < m_max_infer_steps) {
-      for(uint64_t gpu=0;gpu<NGPU;gpu++){
-        if(!running[gpu]) continue;
+
+      while(running[gpu]){
         if(step[gpu]>=m_max_infer_steps){
           running[gpu] = false;
-          --run_counter;
           continue;
         }
-        cudaSetDevice(gpu);
         if (step[gpu] == 0) {
           // init rays at first step
           init_step0<<<div_round_up(num_alive[gpu], m_num_thread), m_num_thread, 0, m_inference_stream[gpu]>>>(
@@ -299,7 +293,6 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
         }
         if (num_alive[gpu] <= 0) {
           running[gpu] = false;  // exit loop if no alive rays
-          --run_counter;
           continue;
         }
 
@@ -343,10 +336,6 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
         step[gpu] += num_step;
         i[gpu] += 1;
       }
-    }
-
-    for(uint64_t gpu=0;gpu<NGPU;gpu++){
-        cudaSetDevice(gpu);
       // std::cout << "get image and depth" << std::endl;
       // get final image and depth
       get_image_and_depth<<<div_round_up(N, m_num_thread), m_num_thread, 0, m_inference_stream[gpu]>>>(
@@ -356,13 +345,10 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
       int offset = gpu*N;
       cudaMemcpyAsync(deep_h+offset, &depth[gpu].view()(0, 0), N * sizeof(float), cudaMemcpyDeviceToHost), m_inference_stream[gpu];
       cudaMemcpyAsync(image_h+3*offset, &image[gpu].view()(0, 0), N * sizeof(float) * 3, cudaMemcpyDeviceToHost, m_inference_stream[gpu]);
-    }
-    for(uint64_t gpu=0;gpu<NGPU;gpu++){
-      cudaSetDevice(gpu);
       cudaStreamSynchronize(m_inference_stream[gpu]);
-    }
-    for(uint64_t gpu=0;gpu<NGPU;gpu++){
-      #pragma omp parallel for num_threads(8)
+    // }
+    // for(uint64_t gpu=0;gpu<NGPU;gpu++){
+      // #pragma omp parallel for num_threads(8)
       for (int i = 0; i < N ; i++) {
         int in_i  = gpu*N+i;
         int out_i = NGPU*i+gpu;
@@ -371,13 +357,16 @@ Image NerfRender::render_frame(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
         us_image[out_i*3+1] = (unsigned char) (255.0 * image_h[in_i*3+1]); 
         us_image[out_i*3+2] = (unsigned char) (255.0 * image_h[in_i*3+2]); 
       }
-    }
+    // }
+        }));}
+    for(auto &thread: threads) thread.join();
+    cudaDeviceSynchronize();
 
   Image img(resolution[0], resolution[1], us_image, us_depth);
   return img;
 }
 
-void NerfRender::generate_rays(struct Camera cam, Eigen::Matrix<float, 4, 4> pos) {
+void NerfRender::generate_rays(struct Camera cam, Eigen::Matrix<float, 4, 4> pos, int threadid=-1) {
 
   int N = resolution[0] * resolution[1] / NGPU;  // number of pixels
   // std::cout << "N: " << N << std::endl;
@@ -386,10 +375,13 @@ void NerfRender::generate_rays(struct Camera cam, Eigen::Matrix<float, 4, 4> pos
 
   int grid_size = ((N + m_num_thread) / m_num_thread);
 
-  for(uint64_t gpu=0;gpu<NGPU;gpu++){
+  if(threadid==-1) for(uint64_t gpu=0;gpu<NGPU;gpu++){
     cudaSetDevice(gpu);
     set_rays_o<<<grid_size, m_num_thread, 0, m_inference_stream[gpu]>>>(rays_o[gpu].view(), new_pose.block<3, 1>(0, 3), N);
     set_rays_d<<<grid_size, m_num_thread, 0, m_inference_stream[gpu]>>>(rays_d[gpu].view(), cam, new_pose.block<3, 3>(0, 0), resolution[0], N, gpu);
+  }else{
+    set_rays_o<<<grid_size, m_num_thread, 0, m_inference_stream[threadid]>>>(rays_o[threadid].view(), new_pose.block<3, 1>(0, 3), N);
+    set_rays_d<<<grid_size, m_num_thread, 0, m_inference_stream[threadid]>>>(rays_d[threadid].view(), cam, new_pose.block<3, 3>(0, 0), resolution[0], N, threadid);
   }
 }
 
