@@ -278,6 +278,13 @@ target_link_libraries(testbed PUBLIC ngp)
 target_compile_options(testbed PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
 target_compile_definitions(testbed PUBLIC ${NGP_DEFINITIONS} ${TCNN_DEFINITIONS})
 
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+add_executable(render_server src/render_server.cu)
+target_link_libraries(render_server PUBLIC ngp /usr/local/lib/libsockpp.so Threads::Threads)
+target_compile_options(render_server PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+target_compile_definitions(render_server PUBLIC ${NGP_DEFINITIONS} ${TCNN_DEFINITIONS})
+
 # Copy DLSS shared libraries
 if (NGP_VULKAN)
 	if (CMAKE_BUILD_TYPE STREQUAL "Debug")

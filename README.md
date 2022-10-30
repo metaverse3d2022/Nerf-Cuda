@@ -5,14 +5,29 @@ This project achieves NeRF rendering based on C++, Cuda and some open source pac
 - Static scene rendering based on NeRF model
 - Dynamic scene rendering based on some dynamic NeRF model 
 
-## Installation
+## Building the Library
+
+- Dependencies
+    - sockpp (https://github.com/fpagliughi/sockpp)
+
+- Download
+```shell
+$ git clone git@github.com:metaverse3d2022/Nerf-Cuda.git 
+$ git submodule update --init --recursive  
+```
+- Compile
 ```shell
 $ mkdir build
 $ cd build
 $ cmake ..
 $ make -j16
+$ # In another way, you can just run "source build.sh". After compiling, you can run ./build/testbed for testing.
 ```
-In another way, you can just run "source build.sh". After compiling, you can run ./build/testbed for testing.
+
+## Usage
+```shell
+$ ./build/render_server # open the render server
+```
 
 ## Troubleshooting compile errors
 
