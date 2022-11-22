@@ -32,6 +32,13 @@
 #    pragma diag_suppress = unsigned_compare_with_zero
 #  endif
 #endif
+
+#ifdef __NVCC__
+#define NGP_HOST_DEVICE __host__ __device__
+#else
+#define NGP_HOST_DEVICE
+#endif
+
 // Eigen is a C++ template library for linear algebra: matrices, vectors, numerical solvers, and related algorithms.
 #include <Eigen/Dense>
 
@@ -82,5 +89,39 @@ struct Image {
 };
 
 #define NGPU 2
+
+enum class EColorSpace : int {
+	Linear,
+	SRGB,
+	VisPosNeg,
+};
+static constexpr const char* ColorSpaceStr = "Linear\0SRGB\0\0";
+
+enum class ETonemapCurve : int {
+	Identity,
+	ACES,
+	Hable,
+	Reinhard
+};
+static constexpr const char* TonemapCurveStr = "Identity\0ACES\0Hable\0Reinhard\0\0";
+
+enum class EDlssQuality : int {
+	UltraPerformance,
+	MaxPerformance,
+	Balanced,
+	MaxQuality,
+	UltraQuality,
+	NumDlssQualitySettings,
+	None,
+};
+static constexpr const char* DlssQualityStr = "UltraPerformance\0MaxPerformance\0Balanced\0MaxQuality\0UltraQuality\0Invalid\0None\0\0";
+static constexpr const char* DlssQualityStrArray[] = {"UltraPerformance", "MaxPerformance", "Balanced", "MaxQuality", "UltraQuality", "Invalid", "None"};
+
+enum class EImageDataType {
+	None,
+	Byte,
+	Half,
+	Float,
+};
 
 NGP_NAMESPACE_END
