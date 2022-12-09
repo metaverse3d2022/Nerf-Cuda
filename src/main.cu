@@ -168,6 +168,7 @@ int main(int argc, char** argv) {
   stbi_write_png(deep_file_name, img.W, img.H, 1, img.depth, img.W * 1);
   stbi_write_png(image_file_name, img.W, img.H, 3, img.rgb, img.W * 3);
 
+  cudaSetDevice(0); // tmp set 0 for dlss
   int in_height = img.H;
 	int in_width = img.W;
   ngp::CudaRenderBuffer m_windowless_render_surface{std::make_shared<ngp::CudaSurface2D>()};
